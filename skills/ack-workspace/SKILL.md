@@ -356,8 +356,11 @@ What the bootstrap creates (via `eksctl create cluster` with a generated config)
   shared account lets a single association cover every controller on the cluster. Pass
   `--service-account` to use a different name and an association is created for that one.
 
-Each step is idempotent: a later deploy only fills in what is missing, so this is also how you
-add an association for a service account that lacks one.
+**The cluster is meant to be long-lived.** Create it once and keep it. Every provisioning step
+is idempotent, so each later deploy only fills in what is missing — which is also how you add
+an association for a service account that lacks one — and skips the 15–25 minute creation
+entirely, leaving just build, push, and install. Multiple controllers coexist on it, sharing
+one namespace, service account, and association.
 
 ```bash
 ack-workspace deploy ecr --dry-run               # preview, including any cluster creation
@@ -366,12 +369,14 @@ ack-workspace deploy ecr --cluster-policy-arn <arn>  # scope the role down
 ```
 
 `--cluster-version` and `--cluster-policy-arn` apply only when the cluster (or its role) has
-to be created; they are ignored once it exists.
+to be created, so they are ignored once it exists. Changing either afterwards means editing the
+resource directly, or deleting it and letting the next deploy recreate it.
 
-> **Caution:** creating the cluster takes 15–25 minutes and creates billable AWS resources
-> (EKS cluster, VPC, IAM role). The role gets `AdministratorAccess` by default so any ACK
-> controller works in a throwaway dev account — scope it with `--cluster-policy-arn`
-> anywhere shared.
+> **Caution:** the first deploy takes 15–25 minutes and creates billable AWS resources (EKS
+> cluster, VPC, IAM role), and a long-lived cluster keeps costing while it runs — keep it in a
+> development account you are happy to leave running. The role gets `AdministratorAccess` by
+> default so any ACK controller works without further setup — scope it with
+> `--cluster-policy-arn` anywhere shared.
 
 Verify the association and that its credentials reached the pod. Read the injected variables
 from the pod spec — the controller image is distroless, so `kubectl exec ... -- env` fails with
@@ -383,8 +388,8 @@ kubectl -n ack-system get pod -l app.kubernetes.io/instance=ack-<svc>-controller
   -o jsonpath='{range .items[0].spec.containers[0].env[*]}{.name}{"\n"}{end}' | grep AWS_CONTAINER
 ```
 
-Tear down when finished, deleting your custom resources first so the controllers clean up
-the AWS resources they created (those do not go away with the cluster):
+To delete it, remove your custom resources first so the controllers clean up the AWS resources
+they created (those do not go away with the cluster):
 
 ```bash
 eksctl delete cluster --name ack-dev-auto --region us-west-2
@@ -625,12 +630,11 @@ ack-workspace build <svc>             # regenerate types, CRDs, RBAC, Helm chart
 git -C <workspace-root>/<svc>-controller status   # review + commit generated artifacts
 ```
 
-**Test a local change on a cluster (creates `ack-dev-auto` on first run):**
+**Test a local change on a cluster (creates `ack-dev-auto` on the first run, reuses it after):**
 ```bash
 ack-workspace build <svc>             # regenerate code if generator.yaml/hooks changed
 ack-workspace deploy <svc> --dry-run  # preview, including any cluster creation
-ack-workspace deploy <svc>            # ~15-25 min extra the first time
-eksctl delete cluster --name ack-dev-auto --region us-west-2   # when finished with the cluster
+ack-workspace deploy <svc>            # first run adds ~15-25 min for the cluster; later runs reuse it
 ```
 
 **Cut a release:**
@@ -659,7 +663,8 @@ ack-workspace remove <svc>               # local + fork (prompts)
 - Commit or stash feature-branch work before `refresh` (uncommitted changes are discarded).
 - For `deploy`, confirm your AWS credentials point at a development account: it creates an
   ECR repository when absent, and — when `ack-dev-auto` does not exist — an EKS cluster, a
-  VPC, and an IAM role with `AdministratorAccess`. Dry-run first, and delete the cluster when
-  you are done with it. Note that deploy also **rewrites your current kubeconfig context**.
+  VPC, and an IAM role with `AdministratorAccess`. The cluster is expected to stay up between
+  deploys, so it keeps costing until deleted; dry-run first in an account you are unsure about.
+  Note that deploy also **rewrites your current kubeconfig context**.
 - For `remove`, prefer `--keep-fork` unless you truly want the fork deleted permanently.
 - Never expect the token to be saved — always supply it via env/flag.
