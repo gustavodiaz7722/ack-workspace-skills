@@ -6,6 +6,8 @@ The distinction from `ack-dev-skills` is the dependency. Skills here delegate th
 
 ## What's here
 
+**`ack-workspace`** — reference guide to the CLI itself: every command, the global flags, configuration precedence, prerequisites, and which operations are destructive.
+
 **`ack-reference-audit`** — audit ACK controllers for CRD fields that should be cross-resource references but carry no `references` block in `generator.yaml`, and wire up the ones that should. Backed by `ack-workspace candidates`.
 
 ## Prerequisite
@@ -19,10 +21,12 @@ ack-workspace candidates --help
 
 ## Install
 
-Point your agent's skills directory at this repo, or symlink an individual skill:
+Symlink the skills rather than copying them, so a change in the checkout takes effect immediately and there is no second copy to drift:
 
 ```bash
-ln -s "$PWD/skills/ack-reference-audit" ~/.kiro/skills/ack-reference-audit
+for s in skills/*/; do
+  ln -sfn "$PWD/$s" ~/.kiro/skills/"$(basename "$s")"
+done
 ```
 
 The roles, workflows, and agents directories sit at the repo root and are referenced by relative path from the skill, so keep the tree intact rather than copying `skills/` alone.
@@ -30,6 +34,9 @@ The roles, workflows, and agents directories sit at the repo root and are refere
 ## Layout
 
 ```
+skills/ack-workspace/           # CLI reference
+└── SKILL.md
+
 skills/ack-reference-audit/     # Agent Skill directory
 ├── SKILL.md                    # Entry point: prerequisite, the two tasks, what makes an audit wrong
 └── references/
