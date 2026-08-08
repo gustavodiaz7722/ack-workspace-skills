@@ -6,10 +6,10 @@ description: >-
   setting up an ACK workspace, adding or removing service controllers, syncing
   forks to upstream, cutting a controller release, regenerating a controller's
   code with the code-generator, building and deploying a controller to a
-  cluster, checking repo status, scanning controllers for known issues, or
-  building the cross-resource-reference candidate index for a resource.
+  cluster, checking repo status, or building the cross-resource-reference
+  candidate index for a resource.
   Covers every command (init, add, remove, refresh, release, build, deploy,
-  status, scan, candidates, config), global flags, configuration,
+  status, candidates, config), global flags, configuration,
   prerequisites, and safety behavior.
 license: Apache-2.0
 metadata:
@@ -72,15 +72,14 @@ message if a prerequisite is missing.
 | `build`  |  yes  |      no      |       no        | `make`/`go` toolchain (+ code-generator build deps); code-generator in workspace |
 | `refresh`|  yes  |     yes²     |       yes       | — |
 | `status` |  yes  |      no      |       no        | — |
-| `scan`   |  no³  |      no      |       no        | AWS creds (Bedrock), `grep` |
-| `candidates` | no | no | no | network access to the public API models |
+| `candidates` | no | no | no | network access to the public API models³ |
 | `config` |  no   |      no      |       no        | — |
 
 ¹ needs a token to open the upstream PR and identity to name the fork branch; `--skip-pr`
 pushes the branch without opening a PR.
 ² needs token + identity to sync your fork from upstream via the GitHub API.
-³ `scan` uses AWS credentials for Bedrock (default credential chain). `GITHUB_TOKEN`, if
-present, only raises the rate limit when listing Terraform provider docs.
+³ `candidates` uses no AWS credentials. `GITHUB_TOKEN`, if present, only raises the rate
+limit on the API model fetches.
 
 ## Configuration
 
@@ -441,53 +440,6 @@ ack-workspace status --json
 Use `status` before `refresh`/`release` to see which repos are dirty or diverged, and after
 bulk operations to confirm the end state. The `--json` output is machine-readable for scripts.
 
-### `scan` — investigate known issues with a Bedrock agent
-
-Run an Amazon Bedrock, tool-using agent that investigates a known issue against a single
-resource of a single controller and reports structured findings. Each `(controller, resource,
-issue)` triple is one independent agent conversation; any dimension may be `all` to fan out
-(conversations run in parallel, bounded by `--concurrency`).
-
-```bash
-ack-workspace scan sns --resource Subscription --issue 1   # one triple
-ack-workspace scan sns --resource all --issue 1            # every SNS resource
-ack-workspace scan all                                     # every issue/resource/controller
-```
-
-The agent works from a small sandboxed source set — a pre-filtered index of the resource's
-CRD spec fields fused with its `generator.yaml` markings, plus the resource's Terraform
-provider docs — searched with `grep`. Each issue defines its own pass/fail rule and reduced
-summary:
-
-```
-sns/Topic  issue 1 (json-document-fields)  FAIL
-    incorrectly marked: dataProtectionPolicy (is none, expected is_document)
-    correctly marked: deliveryPolicy, policy
-    terraform-only (no CRD field): archive_policy
-```
-
-Currently available issues:
-- **Issue 1 (`json-document-fields`)** — find CRD fields holding a JSON/YAML or IAM policy
-  document that are not marked `is_document` / `is_iam_policy` in `generator.yaml`.
-- **Issue 2 (`missing-references`)** — find CRD fields holding an ARN, ID, or Name that
-  points at another AWS resource but carry no `references` block in `generator.yaml`.
-- **Issue 3 (`embedded-subresources`)** — find nested structures in a CRD that should be
-  their own resource.
-
-For issue 2, note the division of labour with [`candidates`](#candidates--emit-the-cross-resource-reference-candidate-index): `scan` decides which fields are references, `candidates` produces the field set it decides over. Use `candidates` when you want the field set itself — to audit it by hand, to split an audit across reviewers, or to diff two runs.
-
-Useful flags:
-
-```bash
-ack-workspace scan sns --resource Topic --issue 1 --json                       # full findings
-ack-workspace scan sns --resource Topic --issue 1 --debug                      # transcript on stderr (serial)
-ack-workspace scan sns --issue 1 --model <bedrock-model-id> --region us-west-2 # pick model/region
-```
-
-`--json` emits full findings (each finding's `terraform_field` and `ack_field_path`);
-`--debug` prints the complete conversation to stderr, leaving stdout clean. An unknown or
-unparsable issue selector is a usage error (exit code `2`).
-
 ### `candidates` — emit the cross-resource-reference candidate index
 
 Emit the deterministic candidate index a reference audit starts from: every string-valued
@@ -500,10 +452,10 @@ ack-workspace candidates eks --resource Nodegroup                     # records 
 ack-workspace candidates all --resource all --out-dir /tmp/ref-audit  # one file per resource
 ```
 
-This is the mechanical half of a reference audit, separated from the judgment. `scan --issue 2`
-runs an agent that decides which candidates are references; `candidates` just produces the
-field set it decides over — so an audit can be split across independent reviewers who all
-start from identical input, and two runs over an unchanged repo produce byte-identical output.
+This is the mechanical half of a reference audit, separated from the judgment about which
+candidates are genuine references: `candidates` produces the field set a reviewer decides
+over — so an audit can be split across independent reviewers who all start from identical
+input, and two runs over an unchanged repo produce byte-identical output.
 
 Records are JSON Lines on stdout; per-resource progress, the resolved model name, and the
 `ignore.field_paths` suppression notes go to stderr, so a plain redirect gives a clean stream.
@@ -526,9 +478,9 @@ Three lines in the stderr output change what a finding may conclude:
 | `model … unavailable` | Nested fields have no description or pattern; records carry `model_unavailable: true` |
 | `N identifier-looking field(s) suppressed` | `ignore.field_paths` hides them from every index, and a suppression can hide a reference |
 
-Reads local repos and the public API models: no AWS credentials, git, or GitHub identity, so
-unlike `scan` it needs no Bedrock. A model that cannot be fetched degrades the index and says
-so rather than failing the run.
+Reads local repos and the public API models: no AWS credentials, git, or GitHub identity
+required. A model that cannot be fetched degrades the index and says so rather than failing
+the run.
 
 ### `config` — view and persist settings
 
@@ -563,7 +515,7 @@ never stops the batch.
 - `0` — completed and no repository failed (dry-run always exits `0`).
 - `1` — a pre-flight error occurred, or at least one repository failed.
 - `2` — a usage/validation error (e.g. out-of-range `--concurrency`, `add` with no
-  identifiers, missing/invalid `release` version, unknown `scan` issue selector).
+  identifiers, missing/invalid `release` version, a missing service identifier).
 
 ---
 
@@ -605,9 +557,9 @@ ack-workspace release <svc> --version v1.2.3 --dry-run
 ack-workspace release <svc> --version v1.2.3
 ```
 
-**Audit controllers for a known issue:**
+**Build the candidate index for a reference audit:**
 ```bash
-ack-workspace scan all --issue 1 --json > findings.json
+ack-workspace candidates all --resource all --out-dir /tmp/ref-audit
 ```
 
 **Reclaim disk / retire a fork:**
