@@ -59,27 +59,38 @@ These apply to every command. They are not repeated per section.
 
 ## Prerequisites
 
-Requires Go 1.26+ and a `git` executable on `PATH`. Each command fails fast with a clear
-message if a prerequisite is missing.
+Requires Go 1.26+ to build. Every command declares what it needs and it is all verified
+**before any work starts**; several missing things produce one error naming all of them.
 
-| Command  | `git` | GitHub token | GitHub identity | Other |
-|----------|:-----:|:------------:|:---------------:|-------|
-| `init`   |  yes  |     yes      |       yes       | — |
-| `add`    |  yes  |     yes      |       yes       | — |
-| `remove` |  yes  |     yes      |       yes       | — |
-| `release`|  yes  |     yes¹     |       yes       | code-generator in workspace |
-| `deploy` |  yes  |      no      |       no        | AWS creds (may create an EKS cluster), `docker`/`aws`/`kubectl`/`helm`/`eksctl`; code-generator in workspace |
-| `build`  |  yes  |      no      |       no        | `make`/`go` toolchain (+ code-generator build deps); code-generator in workspace |
-| `refresh`|  yes  |     yes²     |       yes       | — |
-| `status` |  yes  |      no      |       no        | — |
-| `candidates` | no | no | no | network access to the public API models³ |
-| `config` |  no   |      no      |       no        | — |
+| Command  | Executables on `PATH` | GitHub token | GitHub identity | Also needed (not pre-flighted) |
+|----------|-----------------------|:------------:|:---------------:|--------------------------------|
+| `init`   | `git` | yes | yes | — |
+| `add`    | `git` | yes | yes | — |
+| `remove` | `git` | yes | yes | — |
+| `refresh`| `git` | yes¹ | yes | — |
+| `release`| `git` | yes² | yes | code-generator in workspace + its build deps |
+| `build`  | `git`, `make`, `go` | no | no | code-generator in workspace |
+| `deploy` | `git`, `docker`, `aws`, `kubectl`, `helm`, `eksctl`³ | no | no | AWS creds (may create an EKS cluster); code-generator in workspace |
+| `status` | `git` | no | no | — |
+| `attribution` | `git` | no | no | AWS creds (CodeBuild, S3) |
+| `candidates` | — | no | no | network access to the public API models⁴ |
+| `config` | — | no | no | — |
 
-¹ needs a token to open the upstream PR and identity to name the fork branch; `--skip-pr`
+¹ needs token + identity to sync your fork from upstream via the GitHub API.
+
+² needs a token to open the upstream PR and identity to name the fork branch; `--skip-pr`
 pushes the branch without opening a PR.
-² needs token + identity to sync your fork from upstream via the GitHub API.
-³ `candidates` uses no AWS credentials. `GITHUB_TOKEN`, if present, only raises the rate
-limit on the API model fetches.
+
+³ `eksctl` is required even though `deploy` only uses it when the cluster must be created —
+better to know before a 20-minute image build than after.
+
+⁴ `candidates` uses no AWS credentials and shells out to nothing. `GITHUB_TOKEN`, if present,
+only raises the rate limit on the API model fetches.
+
+**AWS credentials, and anything else needing a network round-trip, are not pre-flighted.** An
+expired session surfaces when the command runs, not up front; keeping the check hermetic is
+what makes it free to run every time.
+
 
 ## Configuration
 
