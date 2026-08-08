@@ -26,7 +26,15 @@ ack-workspace candidates --help
 ./scripts/install-skills.sh --dir DIR    # or into a workspace .kiro/skills
 ```
 
-Symlinks rather than copies, so an edit in the checkout takes effect immediately and there is no second copy to drift.
+Symlinks rather than copies, so an edit in a checkout takes effect immediately and there is no second copy to drift.
+
+### It installs sibling repositories' skills too
+
+Which skills get installed comes from [`scripts/skill-sources`](scripts/skill-sources), a list of directories that hold skill directories. It ships with this repo's `skills/` plus `../ack-dev-skills/skills`, so one command installs and health-checks all four ACK skills.
+
+Listing a sibling repo here rather than adding a script to it is deliberate. `ack-dev-skills` is a fork of an upstream repo, and `ack-workspace refresh` does `ResetHard` + `Clean` + `ResetHardTo upstream` on the default branch — so anything committed to that fork's `main` is destroyed by a routine refresh, taking the protection with it precisely when you'd want it. Keeping the source list here means the fork stays byte-identical to upstream and its skills are still covered.
+
+A listed source that isn't cloned is reported and skipped, not an error. Two sources offering the same skill name is an error, because which one won would otherwise depend on file order.
 
 ### Re-run it after the checkout moves
 

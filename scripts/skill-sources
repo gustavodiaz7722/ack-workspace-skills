@@ -1,0 +1,21 @@
+# Directories that contain skill directories (each holding a SKILL.md).
+#
+# install-skills.sh installs every skill found under these roots. Listing a
+# sibling repository here is how its skills get installed and health-checked
+# without committing anything to that repository — which matters for a fork:
+# `ack-workspace refresh` does ResetHard + Clean + ResetHardTo upstream on the
+# default branch, so a script committed to a fork's main is destroyed by a
+# routine refresh, taking the protection with it.
+#
+# Paths are relative to this repository's root (or absolute; ~ and $VARS are
+# expanded). Prefer relative: they are what makes the installation survive the
+# checkout moving, since a re-run then resolves the new location on its own.
+#
+# A listed root that does not exist is reported and skipped, not an error — a
+# sibling repo you have not cloned simply contributes no skills.
+
+# This repository.
+skills
+
+# ACK development skills (upstream fork; we deliberately commit nothing to it).
+../ack-dev-skills/skills
