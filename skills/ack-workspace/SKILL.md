@@ -316,17 +316,90 @@ Steps:
 6. `helm upgrade --install ack-<svc>-controller <controller>/helm` into `ack-system`,
    pointing at the freshly pushed image.
 
+**Steps 4 and 5 are skipped when the tag is already in ECR**, and the existing image is deployed
+instead — see [Image reuse](#image-reuse) below.
+
 By default the image is tagged with the controller's checked-out HEAD short SHA, so each build
 is traceable to the exact local commit. Useful flags:
 
 ```bash
 ack-workspace deploy ecr --dry-run                       # preview; changes nothing
-ack-workspace deploy ecr --image-tag dev                 # fixed tag instead of HEAD SHA
-ack-workspace deploy ecr --namespace ack-test            # different namespace
-ack-workspace deploy ecr --repository my-ecr-controller  # override ECR repo name
 ack-workspace deploy ecr --region us-west-2              # target a specific region
-ack-workspace deploy ecr --service-account ack-ecr-controller  # bind creds to another account
+ack-workspace deploy ecr --resync-period 60             # resync every 60s instead of the chart's 10h
 ```
+
+#### Fixed destination
+
+The ECR repository (`<svc>-controller`), the namespace (`ack-system`), the Helm release
+(`ack-<svc>-controller`), and the service account (`ack-controller`) are all fixed. **None is
+selectable.**
+
+The namespace and service account could not be flags even if they were wanted, because they are the
+two halves of one key: a pod identity association is keyed on exactly one
+`(namespace, serviceAccount)` pair with no wildcards, so credentials reach a controller only if its
+install matches the association on both. One shared account is what lets a single association cover
+every controller on the cluster; deployed under any other — including the per-service account the
+chart creates by default — a controller starts with no credentials and exits with `unable to
+determine account info`.
+
+Fixing the repository and release removes a subtler failure: two deploys of one controller
+disagreeing about where it lives, leaving a second ECR repository with a divergent image history or
+a parallel Helm release.
+
+#### Image reuse
+
+A deploy is **identified by its commit**, and two rules with no opt-out make that true:
+
+- The image tag is always the controller's checked-out HEAD short SHA. There is no tag override.
+- The working tree must be clean. **A controller with uncommitted changes is refused** (exit `1`).
+
+So the tag is a complete description of the image's source. A tag already in ECR therefore
+*proves* an image built from exactly this source exists, and `deploy` **skips the build and push**
+and installs it. Redeploying a commit — retrying after a failed `helm` step, or changing a chart
+value like the resync period — costs a rollout instead of a full image build, with no flag to
+remember.
+
+```
+ecr-controller  failed  ecr-controller has uncommitted changes; commit them so the deployed
+                        image tag identifies the source it was built from
+```
+
+The refusal is the point, not an inconvenience. With a dirty tree the SHA names the commit and not
+the edits on top of it, so a deploy would either bake unversioned source into a tag that claims to
+be the commit, or — once that commit had been built before — reuse the older image and silently
+validate code you had just changed. Both report success. Committing is the fix; there is
+deliberately no force-rebuild flag, because a flag to work around the ambiguity is worse than not
+having the ambiguity.
+
+Two further consequences of deciding by fact rather than assumption:
+
+- **A failed lookup stops the deploy.** Expired credentials or no network means build-or-reuse
+  cannot be answered, and guessing either way would reintroduce exactly the silence this design
+  removes. Only a definitive `ImageNotFoundException` or `RepositoryNotFoundException` counts as
+  "absent".
+- **`--dry-run` runs the lookup** (it is read-only) and reports which way it went, so a preview
+  says either `build ... from local source, push it` or `reuse the existing image ... (already in
+  ECR, no build or push)`. It refuses a dirty tree too, rather than printing a plan naming a tag
+  that does not describe the tree.
+
+**`--resync-period` sets the controller's reconcile cadence** (`reconcile.defaultResyncPeriod`
+on the chart, in seconds). The chart default is 36000 — ten hours — which makes any behavior
+that only appears *across* reconciles effectively unobservable in a test session: a
+cross-resource reference whose resolved value differs in form from what the Describe response
+returns, or a server-side default that is never captured into the spec, both manifest as a
+delta that reappears on each resync. Shortening the period to 60 turns a ten-hour wait into
+minutes, which is what makes "no delta after N reconciles" a check you can actually run.
+
+It belongs on the deploy rather than a follow-up `helm upgrade` because deploy installs the
+chart with its **default** values: an override applied beforehand is discarded by the install,
+and one applied afterwards costs a second rollout. Omit the flag and the chart default stands;
+a negative value is a usage error (exit `2`). Note that `0` is not accepted as "use the
+default" — the chart guards the controller argument with `gt (int ...) 0`, so an explicit zero
+would disable periodic resync entirely.
+
+Keep it out of anything long-lived. A 60-second resync means every managed resource is
+re-reconciled every minute, which multiplies AWS API calls and invites throttling once more
+than a handful of resources exist.
 
 > **Caution:** `deploy` may **create** an ECR repository in your AWS account when one is
 > absent, and an EKS cluster when `ack-dev-auto` does not exist. Dry-run first in an account
@@ -353,8 +426,8 @@ What the bootstrap creates (via `eksctl create cluster` with a generated config)
   annotation (that is IRSA, a different mechanism).
 - **The shared `ack-controller` service account**, which the controller runs under.
   Associations are keyed on `(namespace, serviceAccountName)` and support no wildcards, so one
-  shared account lets a single association cover every controller on the cluster. Pass
-  `--service-account` to use a different name and an association is created for that one.
+  shared account lets a single association cover every controller on the cluster. This is why the
+  account is fixed rather than selectable — see [Fixed destination](#fixed-destination).
 
 **The cluster is meant to be long-lived.** Create it once and keep it. Every provisioning step
 is idempotent, so each later deploy only fills in what is missing — which is also how you add
@@ -398,8 +471,9 @@ eksctl delete cluster --name ack-dev-auto --region us-west-2
 #### Troubleshooting `deploy`
 
 `deploy` builds and pushes the image **before** it runs `helm`. If a later step fails, the
-image is already in ECR (tagged with the HEAD short SHA), so finish the rollout by hand rather
-than rebuilding. Confirm the push with
+image is already in ECR (tagged with the HEAD short SHA), so the cheapest fix is to just re-run
+`deploy`: it finds the tag, skips the build and push, and goes straight to the rollout. Confirm
+the push with
 `aws ecr describe-images --repository-name <svc>-controller --image-ids imageTag=<sha>`.
 
 **Helm cannot adopt existing CRDs.** When the cluster already has the service's CRDs installed
@@ -452,8 +526,9 @@ kubectl -n ack-system get deploy -l "$SEL" \
 ```
 
 If the association exists but the label is empty, the pod started first — restart it so the
-webhook runs on a fresh pod. If no association covers the account, re-run `deploy` (it creates
-one for whatever `--service-account` it deploys under):
+webhook runs on a fresh pod. If no association covers `ack-system/ack-controller`, re-run
+`deploy`: it ensures the association on every run, so a cluster missing one is repaired rather
+than needing manual setup.
 
 ```bash
 kubectl -n ack-system rollout restart deploy -l "$SEL"
