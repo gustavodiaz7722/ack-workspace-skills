@@ -116,7 +116,7 @@ What the orchestrator assembles. One document per audit run, whatever its scope.
 # Cross-Resource Reference Audit
 
 - **Scope:** <controller|all> / <resource|all>
-- **Date:** <YYYY-MM-DD>
+- **Date:** <YYYY-MM-DD — from `date -u +%F`, not from memory>
 - **Resources audited:** N
 - **Model enrichment:** N of N resources
 

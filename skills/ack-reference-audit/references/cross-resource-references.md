@@ -14,6 +14,7 @@ How to find CRD fields that should be cross-resource references but aren't, and 
   - Nested Fields Are Where the Gaps Are
 - Part 2: Remediating
   - The generator.yaml Config
+  - References Inside a Custom Field
   - Choosing `path`
   - Same-Service vs Cross-Service
   - Cyclic References
@@ -204,6 +205,8 @@ A live example: cognitoidentityprovider's `UserPool.lambdaConfig` holds a dozen 
 
 And "the obvious ones are surely handled" does not hold as an assumption: cognitoidentityprovider has no `references:` blocks anywhere, so in that controller even the top-level fields are unwired.
 
+**A nested field is not harder to configure than a top-level one, including when its parent is a `custom_field`.** Don't discount a gap on feasibility grounds — see [References Inside a Custom Field](#references-inside-a-custom-field). Judge whether the field holds another resource's identifier; the wiring is the same either way.
+
 ## Part 2: Remediating
 
 ### The generator.yaml Config
@@ -235,6 +238,63 @@ Use the **generator.yaml field path** (the API/Pascal naming, dot-separated for 
 | `path` | yes | Where in the target CR to read the identifier from |
 | `service_name` | cross-service only | The referenced controller's service. **Omit for same-service.** |
 | `skip_resource_state_validations` | rarely | Skip the "target exists and is synced" check. Cyclic references only. |
+
+### References Inside a Custom Field
+
+**A nested member of a `custom_field` can carry a reference, and the generator honors it.** This is worth stating outright because the config looks like it shouldn't work — the parent field is synthesized by ACK rather than lifted from an operation's input shape, so there's a reasonable intuition that field config beneath it has nothing to attach to. That intuition is wrong, and acting on it means declining a valid fix.
+
+ec2's `RouteTable` is the clearest precedent. `Routes` is a custom field, and five of the members inside it are references:
+
+```yaml
+  RouteTable:
+    fields:
+      Routes:
+        custom_field:
+          list_of: CreateRouteInput
+        compare:
+          is_ignored: true        # ec2's delta handling for the custom field; unrelated to the references
+      Routes.GatewayId:
+        references:
+          resource: InternetGateway
+          path: Status.InternetGatewayID
+      Routes.NatGatewayId:
+        references:
+          resource: NATGateway
+          path: Status.NATGatewayID
+      Routes.VPCPeeringConnectionID:
+        references:
+          resource: VPCPeeringConnection
+          path: Status.VPCPeeringConnectionID
+```
+
+Three things this settles:
+
+- **The key is `<CustomFieldName>.<Member>`**, using the custom field's own name as the root segment and the member name from the shape named in `list_of`.
+- **Acronym casing is normalized, so either spelling resolves.** The block above mixes them — `Routes.GatewayId` in raw model casing and `Routes.VPCPeeringConnectionID` in ACK-normalized casing — and both generate. Don't burn time deciding between `RoleArn` and `RoleARN`.
+- **Nesting depth is not a limit.** ec2 `SecurityGroup` puts references two levels down inside a custom field: `IngressRules` is `custom_field: {list_of: IpPermission}`, and `IngressRules.UserIDGroupPairs.GroupID` resolves.
+
+The `*Ref` companion lands **inside the list item**, next to the concrete field, not at the top of the spec:
+
+```yaml
+spec:
+  routes:
+    - destinationCIDRBlock: 0.0.0.0/0
+      gatewayRef:                 # sits alongside routes[].gatewayID
+        from:
+          name: my-igw
+```
+
+Verify with the resolver name, which is the field path joined by underscores and ACK-normalized:
+
+```bash
+grep -o "resolveReferenceFor[A-Za-z_]*" pkg/resource/route_table/references.go
+# resolveReferenceForRoutes_GatewayID
+# resolveReferenceForRoutes_VPCPeeringConnectionID
+```
+
+Fleet-wide there are 11 of these, across ec2 (`RouteTable.Routes.*`, `SecurityGroup.{Ingress,Egress}Rules.UserIDGroupPairs.*`, `NetworkAcl.Associations.SubnetID`) and route53resolver (`ResolverEndpoint.IPAddresses.SubnetID`). Two controllers only, which is why it reads as unprecedented if you go looking casually — but it is established, not experimental.
+
+These subtrees are also the ones the candidate index has to work hardest for: because the parent is synthesized, its members are documented nowhere in the CRD, and `ack-workspace candidates` reaches them only by mounting the named shape onto the field's path prefix.
 
 ### Choosing `path`
 
@@ -299,12 +359,17 @@ The real case is ec2's `SecurityGroup`, whose rules can name another security gr
 ```yaml
   SecurityGroup:
     fields:
+      IngressRules:
+        custom_field:
+          list_of: IpPermission
       IngressRules.UserIDGroupPairs.GroupID:
         references:
           resource: SecurityGroup
           path: Status.ID
           skip_resource_state_validations: true
 ```
+
+(`IngressRules` is a custom field — this doubles as a precedent for [References Inside a Custom Field](#references-inside-a-custom-field). Don't read the reference here as working *because* the parent is an ordinary list.)
 
 **This transfers an obligation to you.** With validation skipped, the reference resolves against a target that may not exist in AWS yet. You must amend `sdkCreate`/`sdkUpdate` (via hooks) to wait for the referenced resource's desired state before any API call that needs it. ec2-controller's `security_group` is the reference implementation. Don't reach for this flag to silence a sync error that isn't actually cyclic — see [community#2119](https://github.com/aws-controllers-k8s/community/issues/2119).
 
@@ -424,6 +489,7 @@ Before opening the PR, confirm all of it landed:
 - **`service_name` on a same-service reference** breaks the build with an unresolved `<service>apitypes` import. The most common mistake, and the error message doesn't point at generator.yaml.
 - **Wrong `path`** generates and compiles cleanly, then fails at runtime — empty on the target gives `ResourceReferenceMissingTargetFieldFor`, and the wrong *form* (bare ID where the API returns an ARN) gives a delta that never clears.
 - **A nested reference usually needs more than a `references` block.** On its own it may vanish from the spec after one reconcile, or leave the resource in a permanent diff. Pair it with `set: ignore` on Create/Update and `late_initialize` with `skip_incomplete_check`.
+- **A `custom_field` parent does not block a reference on its members.** Only ec2 and route53resolver do this today, so it looks unprecedented on a casual grep — it isn't. Nor does acronym casing in the key matter; both `Routes.GatewayId` and `Routes.VPCPeeringConnectionID` resolve.
 - **A `Name`-suffixed field is usually the resource's own name.** Require a description that names a *different* resource type before treating it as a reference.
 - **Don't add a reference to a document field.** `is_document`/`is_iam_policy` and `references` describe incompatible contents.
 - **Immutability is not a disqualifier.** References are frequently immutable; that's a signal in favor.

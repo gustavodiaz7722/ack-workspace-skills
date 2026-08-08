@@ -95,6 +95,8 @@ Assemble the merged report per `roles/schemas/reference-audit-output.md`:
 
 Write to `$OUT_DIR/reference-audit-report.md`.
 
+**Take the report date from `date -u +%F`.** Do not write one from memory — a model's sense of the current date is unreliable, and a report stamped with the wrong date is hard to place against the `generator.yaml` state it describes.
+
 The orchestrator aggregates; it does not re-judge. Do not upgrade or downgrade a confidence level you did not investigate yourself.
 
 ## Phase 3: Report
