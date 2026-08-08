@@ -279,7 +279,7 @@ A missing service identifier is a usage error (exit code `2`).
 
 ### `deploy` — build and deploy a controller from local source
 
-Build a single controller from its **local implementation branch** and deploy it to the
+Build a single controller from your **local checkout** and deploy it to the
 shared ACK development cluster, `ack-dev-auto`. Use this to test in-progress changes on a real
 cluster. The controller and `code-generator` must be present; `docker`, `aws`, `kubectl`,
 `helm`, and `eksctl` must be on `PATH`.
