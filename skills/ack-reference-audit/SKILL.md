@@ -35,9 +35,11 @@ If it is missing, build it with `go build .` in the `ack-workspace` checkout.
 **Auditing** a resource for references it should have but doesn't, and **wiring one up**, are different jobs with different failure modes. Both live in [references/cross-resource-references.md](references/cross-resource-references.md):
 
 - *Identifying* — the signal hierarchy, what survives the mechanical pre-filter and must be judged by hand, and the blind spots no index can close.
-- *Remediating* — choosing `path`, the same-service `service_name` trap, cross-service `go.mod` coupling, cyclic references, references inside a custom field, and the compound fix nested references need.
+- *Remediating* — choosing `path`, the same-service `service_name` trap, cross-service `go.mod` coupling, cyclic references, references inside a custom field, the compound fix nested references need, and the end-to-end PR flow: `generator.yaml` → `ack-workspace build` → `attribution` → `deploy` → live-cluster validation against four pass criteria.
 
 Read it before doing either. This file does not restate it.
+
+The PR body for a reference-adding change is [references/pr-template.md](references/pr-template.md): the fields added, and the verification that each one resolves.
 
 ## Auditing One Resource
 

@@ -21,6 +21,8 @@ How to find CRD fields that should be cross-resource references but aren't, and 
   - Nested References Need More Than a `references` Block
   - What Gets Generated
   - Regenerate and Verify
+  - Cutting the PR
+  - Pass Criteria
 - Gotchas
 
 ## Why References Matter
@@ -442,7 +444,7 @@ Validate all three inputs, over several reconciles rather than one:
 | concrete value supplied, no ref | value kept as-is, no delta |
 | neither supplied | AWS default absorbed via `late_initialize`, no delta, `ACK.ResourceSynced=True` and not stuck in incomplete late-init |
 
-A single reconcile proves nothing here — all three symptoms above are recurring diffs that only show up across cycles. Shorten the resync period and count occurrences of `desired resource state has changed` for the resource; expect zero once converged.
+A single reconcile proves nothing here — all three symptoms above are recurring diffs that only show up across cycles. Deploy with `--resync-period 60` and count occurrences of `desired resource state has changed` for the resource over at least 3 reconciles; expect zero once converged. See [Pass Criteria](#pass-criteria).
 
 ### What Gets Generated
 
@@ -475,14 +477,112 @@ A compile proves the code generated, not that the reference resolves. Resolution
 Before opening the PR, confirm all of it landed:
 
 ```
+[ ] Workspace refreshed (runtime, code-generator, controller) before generating
 [ ] references block added with the correct path for each field
 [ ] service_name omitted for same-service, set for cross-service
 [ ] Regenerated; controller compiles; *Ref fields and references.go present
 [ ] Referenced field left the CRD required list
 [ ] go.mod updated and pinned for cross-service references
 [ ] Nested refs also carry set: ignore (Create/Update) + late_initialize/skip_incomplete_check
-[ ] Resolution verified on a live cluster over several reconciles
+[ ] Resolution verified on a live cluster, delta-free across at least 3 reconciles
 ```
+
+### Cutting the PR
+
+The full sequence from an audit finding to an open PR. Each step is a gate: don't proceed past one that didn't do what it claims.
+
+| # | Step | Command |
+|---|------|---------|
+| 0 | Sync the workspace to a clean upstream baseline | `ack-workspace refresh runtime code-generator <svc>-controller` |
+| 1 | Add the `references` blocks to `generator.yaml` | edit only `generator.yaml` |
+| 2 | Regenerate | `ack-workspace build <svc>` |
+| 3 | Verify the generated output, then commit | `git diff` per [Regenerate and Verify](#regenerate-and-verify) |
+| 4 | **Only if a cross-service target was added:** push the branch, then regenerate attribution | `git push -u origin <branch>` → `ack-workspace attribution <svc>` |
+| 5 | Commit `ATTRIBUTION.md` | — |
+| 6 | Deploy to the dev cluster with a short resync period | `ack-workspace deploy <svc> --resync-period 60` |
+| 7 | Validate against the [pass criteria](#pass-criteria) | — |
+| 8 | Open the PR with the body from [pr-template.md](pr-template.md) | `gh pr create` |
+
+Five things about this sequence are not obvious from the command list.
+
+**Step 0 is not optional housekeeping.** Generated output is a function of three inputs — the controller's `generator.yaml`, the code-generator, and the runtime's CRD definitions — so building against a stale copy of any of them produces artifacts that don't match what CI regenerates, and the `<svc>-verify-code-gen` check fails on a diff that has nothing to do with your change. Refreshing all three together, then branching off the freshly reset `main`, removes that whole class of failure before it can happen. It also fetches upstream tags, which the release tooling needs to compute chart versions correctly.
+
+`refresh` is destructive in one specific way: it discards uncommitted working-tree changes and untracked files, and resets `main` to upstream. Feature branches survive. Commit or stash before running it, and create your branch *after* it, not before:
+
+```bash
+ack-workspace refresh runtime code-generator <svc>-controller
+git -C <workspace-root>/<svc>-controller checkout -b add-<svc>-references
+```
+
+**Step 3 commits generated code, and a clean regen has one line of noise.** `ack-workspace build` bumps `build_date` in `apis/<version>/ack-generate-metadata.yaml` even when nothing else changed. Revert that one line if it is the only diff in the file (`git checkout -- apis/<version>/ack-generate-metadata.yaml`). Committing the generated artifacts alongside the `generator.yaml` edit is mandatory, not tidiness — controllers run a `<svc>-verify-code-gen` CI check that regenerates and diffs, and it fails on a `generator.yaml` change whose output wasn't committed.
+
+**Step 4 is conditional, and the condition is mechanical.** Attribution only changes when a new module dependency was added, which happens only for a cross-service reference. Let `go.mod` decide rather than guessing:
+
+```bash
+git diff HEAD~1 --stat -- go.mod    # empty => same-service only => skip steps 4-5
+```
+
+**Step 4 must be pushed first, which is why it sits before the PR exists.** `ack-workspace attribution` runs the generator on ephemeral CodeBuild compute, and it clones **your fork at the checked-out branch from the remote** — it cannot see unpushed commits. It verifies the ref is visible on the remote before starting any compute, so an unpushed branch fails fast rather than after several minutes. Push, then run it. If the PR is already open, `--ref pr/<N>` targets the PR head instead. Skipping this leaves the `<svc>-verify-attribution` check red.
+
+**Step 6's `--resync-period` is what makes step 7 possible at all.** The chart resyncs every 36000 seconds — ten hours — so the delta-driven failure modes in this document simply do not recur inside a test session at the default. `--resync-period 60` sets `reconcile.defaultResyncPeriod` on the install, putting three reconciles about three minutes away.
+
+Pass it on the deploy rather than fixing it up afterwards. `deploy` runs a plain `helm upgrade --install`, which resets values to chart defaults: an override applied beforehand is discarded, and one applied afterwards costs a second rollout and is easy to forget. A negative value is a usage error; `0` is rejected rather than meaning "default", because the chart guards the controller argument with `gt (int ...) 0` and an explicit zero would disable resync entirely.
+
+Keep the short period to the dev cluster, and drop it when you're done — at 60 seconds every managed resource re-reconciles every minute, which multiplies AWS API calls and invites throttling. Redeploy without the flag to restore the default; that second deploy reuses the image already in ECR, so it costs a rollout rather than a rebuild.
+
+**Step 3's commit is a precondition of step 6, not just good practice.** `deploy` tags the image with the checked-out HEAD SHA and refuses a controller with uncommitted changes, so regenerating and going straight to a deploy fails with `has uncommitted changes` rather than deploying. That is deliberate: the tag identifies the source, which is what lets a redeploy of the same commit skip the image build entirely. Commit the regenerated artifacts, then deploy.
+
+You do **not** need debug logging for this. The runtime logs `desired resource state has changed` through `rlog.Info` at `V(0)`, so it is visible at the chart's default `info` level.
+
+### Pass Criteria
+
+For a reference field to **PASS**, ALL four must be true after the resource syncs:
+
+| # | Condition | What to check |
+|---|-----------|---------------|
+| 1 | `ACK.ReferencesResolved` = `True` | Reference target was found and ARN resolved |
+| 2 | `ACK.ResourceSynced` = `True` | Resource created/updated successfully in AWS |
+| 3 | Concrete field is **absent** from `.spec` | e.g. `roleARN` should be `null`/missing |
+| 4 | `*Ref` field is **present** in `.spec` | e.g. `roleRef.from.name` = expected target name |
+
+Conditions 3 and 4 are the ones a careless test skips, and they are what the interesting bugs break. A reference that resolved once and then got clobbered by the Create response still shows `ReferencesResolved=True` and `ResourceSynced=True` — the only evidence is the `*Ref` gone from `.spec` and the concrete field in its place. Check all four per field, not two.
+
+**The target needs its own controller running, deployed the same way as the one under test.** A cross-service reference resolves only if the referenced CR reaches `ACK.ResourceSynced=True`, which requires that service's controller on the cluster. Bring each target up the same way you brought up the controller under test — refresh, then deploy:
+
+```bash
+# once per target service, if it isn't in the workspace yet
+ack-workspace add iam kms
+
+# --yes is safe here: these are targets you hold no work in, and refresh only
+# discards uncommitted changes and untracked files
+ack-workspace refresh iam-controller --yes && ack-workspace deploy iam
+ack-workspace refresh kms-controller --yes && ack-workspace deploy kms
+```
+
+**Do not `helm install` the published chart for this.** It looks like the shortcut and it does not work on the dev cluster: the chart defaults to `serviceAccount.create: true` with the name `ack-<svc>-controller`, and the cluster's pod identity association covers only `ack-system/ack-controller`. The target controller would come up with no AWS credentials, exit with `unable to determine account info`, and its CR would never sync — so the reference you are testing fails for a reason that has nothing to do with the reference. `ack-workspace deploy` sets `serviceAccount.create=false` and pins the credentialed account, which is the whole reason to use it here.
+
+Two things fall out of refreshing first. It resets the target to upstream `main`, so the target is a known state rather than whatever your checkout had drifted into — which matters because a target that fails to sync for its own reasons looks exactly like a broken reference. It also leaves the tree clean, which `deploy` requires anyway. Expect the first deploy of each target to build an image; later ones find the tag in ECR and skip straight to the rollout.
+
+Note that the targets do not need `--resync-period`; only the controller under test is being watched for deltas.
+
+This is also why the e2e suite cannot cover reference resolution: it installs only the controller under test.
+
+**Zero deltas across at least 3 reconciles is a required condition, not a nicety.** Three of the failure modes in this document are recurring diffs, and a single cycle cannot distinguish any of them from success — the first reconcile after a create looks identical whether the resource has converged or is about to loop forever. A field that satisfies all four conditions once but shows a delta on the next resync has not passed.
+
+Deploy with `--resync-period 60` (step 6), wait for three cycles to elapse, then count deltas for the resource:
+
+```bash
+# 60s resync => 3 cycles in ~3 minutes; --since covers the window plus the create.
+sleep 200
+kubectl logs -n ack-system -l app.kubernetes.io/instance=ack-<svc>-controller --since=6m \
+  | grep '<resource-name>' | grep -c 'desired resource state has changed'   # expect 0
+```
+
+A non-zero count is a `FAIL` even with all four conditions green, and the count itself points at the cause: match the `A`/`B` values in the logged `diff` against the symptom table in [Nested References Need More Than a `references` Block](#nested-references-need-more-than-a-references-block). Record the number of cycles you observed in the PR — "held delta-free across 3 resyncs" is the claim a reviewer is checking, and it cannot be inferred from a screenshot of the conditions.
+
+**Test every input variant, not just the `*Ref` one.** For nested or server-defaulted fields, the matrix in [Nested References Need More Than a `references` Block](#nested-references-need-more-than-a-references-block) is the required coverage — `*Ref` supplied, concrete value supplied, neither supplied, and parent struct supplied with a defaulted leaf omitted. Testing only the `*Ref` input is the most common way a reference PR passes review with a bug in it.
+
+**A partial pass is reportable, not a pass.** Conditions 1, 3, and 4 holding with `ResourceSynced=False` is acceptable only when the AWS error itself proves the resolved value was sent (an error naming the resolved ARN), *and* full sync needs infrastructure that cannot be provisioned. Say so explicitly in the PR; do not round it up to PASS.
 
 ## Gotchas
 
@@ -495,9 +595,14 @@ Before opening the PR, confirm all of it landed:
 - **Immutability is not a disqualifier.** References are frequently immutable; that's a signal in favor.
 - **A missing `aws.api#arnReference` trait means nothing.** Most service models never adopted it. Use `smithy.api#pattern` instead.
 - **Cross-service references couple release timelines.** Each one pins a version of another controller's API module.
+- **`ack-workspace attribution` cannot see unpushed commits.** It clones your fork from the remote on CodeBuild compute, so push the branch before running it — otherwise it fails fast on an invisible ref, and skipping it leaves `<svc>-verify-attribution` red.
+- **`deploy` refuses a controller with uncommitted changes.** The image tag is the HEAD SHA, so a dirty tree would mean deploying a tag that does not describe the source. Commit the regenerated artifacts before step 6; there is no override flag.
+- **A validation deploy without `--resync-period` cannot detect a delta bug.** The chart's ten-hour default means the second reconcile never arrives during your session, so a perpetual diff looks exactly like a converged resource. `ack-workspace deploy <svc> --resync-period 60`. Setting it *after* the deploy does not work either — `deploy` installs with chart defaults and discards any prior override.
+- **`ReferencesResolved=True` plus `ResourceSynced=True` is not a pass.** Both stay true when the Create response clobbers the `*Ref`. Conditions 3 and 4 — concrete field absent, `*Ref` present — are the ones that catch it.
 
 ## Related
 
+- [PR Template](pr-template.md) — the PR body for a reference-adding change
 - [generator.yaml Reference](../../../references/generator-yaml-reference.md) — full field-level option list
 - [Code Generation Deep Dive](code-generation.md) — wrapper fields, custom fields that can carry references
 - [Testing](testing.md) — E2E test structure for the resource's own CRUD coverage (reference resolution is not covered there)
