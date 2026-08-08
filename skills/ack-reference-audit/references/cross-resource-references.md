@@ -62,7 +62,7 @@ Records go to stdout and every progress line, suppression note, and degradation 
 
 `--out-dir` is what makes a parallel per-resource audit cheap and reproducible: every auditor starts from identical, already-narrowed input, and two runs over an unchanged repository produce byte-identical files.
 
-Each record carries `resource`, `path`, `type`, `description`, `description_source` (`crd` or `model`), `model_join`, `pattern`, `is_reference`, `reference_target`, `is_immutable`, `is_primary_key`.
+Each record carries `resource`, `path`, `type`, `description`, `description_source` (`crd` or `model`), `model_join`, `pattern`, `is_reference`, `reference_target`, `is_immutable`, `is_primary_key`, and — only when the model could not be fetched — `model_unavailable: true`.
 
 Three fields need care:
 
@@ -154,7 +154,9 @@ remoteAccess:
         type: string                                                           # no description
 ```
 
-Nested fields are exactly where missing references concentrate, so an index built without the model leaves them judgeable only by field name. That is a materially weaker basis, not an equivalent one. `candidates` reports the degradation per controller on stderr and sets `model_available: false`; treat a resource indexed that way as `NOT_ASSESSED` territory rather than a clean pass.
+Nested fields are exactly where missing references concentrate, so an index built without the model leaves them judgeable only by field name. That is a materially weaker basis, not an equivalent one. `candidates` reports the degradation per controller on stderr and marks every affected record `model_unavailable: true`; treat a resource indexed that way as `NOT_ASSESSED` territory rather than a clean pass.
+
+Do not read a missing `pattern` as the same thing. Whole services publish no ARN patterns — wafv2 constrains every ARN with nothing but `\S` — so signal 1 being unavailable is common and says nothing about enrichment.
 
 **Model file name:** defaults to the controller alias, but `sdk_names.model_name` in `generator.yaml` overrides it — `documentdb-controller` uses `docdb.json`, `cognitoidentityprovider-controller` uses `cognito-identity-provider.json`. `candidates` resolves this itself and reports the name it used on stderr, so don't hand-derive it.
 

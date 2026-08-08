@@ -53,8 +53,9 @@ For the full fleet expect 268 indexes across 70 controllers, in about 20 seconds
 
 For each resource index, dispatch one **Reference Auditor** (`roles/reference-auditor.md`):
 
-> Execute the Reference Auditor role.
+> Execute the Reference Auditor role at roles/reference-auditor.md.
 > CONTROLLER_DIR={CONTROLLER_DIR} RESOURCE={Kind}
+> PHASE0_LOG={OUT_DIR}/phase0.log
 > CANDIDATE_INDEX={OUT_DIR}/{alias}/{Kind}.jsonl
 > Produce a per-resource finding following roles/schemas/reference-audit-output.md.
 

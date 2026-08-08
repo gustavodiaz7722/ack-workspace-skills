@@ -9,8 +9,14 @@ You audit **one resource of one controller** for cross-resource reference fields
 | `CONTROLLER_DIR` | Path to the service controller repository |
 | `RESOURCE` | The single resource Kind you are auditing |
 | `CANDIDATE_INDEX` | Path to the pre-built candidate index for this resource (`<Resource>.jsonl`), produced by `ack-workspace candidates` |
+| `PHASE0_LOG` | Path to the orchestrator's Phase 0 log, carrying the `ignore.field_paths` suppression list and any model-unavailable warning for this controller. Optional; when absent, read `ignore.field_paths` from `generator.yaml` yourself. |
 
-Your output schema is `roles/schemas/reference-audit-output.md`. The identification method, signal hierarchy, and remediation config reference is `skills/ack-reference-audit/references/cross-resource-references.md` — read it; this SOP does not restate it.
+Both documents you need sit beside this one in the same repository, resolved relative to *this file*, not to `CONTROLLER_DIR`:
+
+- output schema — [`schemas/reference-audit-output.md`](schemas/reference-audit-output.md)
+- identification method, signal hierarchy, and remediation config — [`../skills/ack-reference-audit/references/cross-resource-references.md`](../skills/ack-reference-audit/references/cross-resource-references.md)
+
+Read the second one; this SOP does not restate it.
 
 ## Scope Boundary
 
@@ -38,13 +44,17 @@ Do not re-read `helm/crds/` to rebuild the field list. Read the CRD or `generato
 
 If the index is missing or empty, your verdict is `NOT_ASSESSED`. Do not substitute your own field enumeration and report it as a completed audit.
 
-**Check that enrichment is present before you start.** If no record carries `description_source: model` or a `pattern`, the model was unavailable when the index was built, and every nested field is being judged from its name alone. That is a degraded audit, not an equivalent one: say so in the finding, set `Model available: no`, and lower confidence on every nested-field judgment. Do not silently proceed as though coverage were the same. (A resource whose spec is entirely top-level fields legitimately shows `description_source: crd` throughout while still being fully enriched — the presence of `pattern` values distinguishes the two cases.)
+**Check that enrichment is present before you start.** A record carrying `model_unavailable: true` means the service's API model could not be fetched when the index was built, so every nested field is being judged from its name alone. The key appears **only** on a degraded record — a healthy index omits it — so its absence is the normal case and needs no interpretation.
+
+A degraded audit is not an equivalent one: say so in the finding, set `Model available: no`, and lower confidence on every nested-field judgment. Do not silently proceed as though coverage were the same.
+
+Do not try to infer degradation from missing `pattern` values instead. Plenty of services publish no ARN patterns at all — wafv2 constrains every ARN with nothing but `\S` — so an index with no patterns may be perfectly enriched. `model_unavailable` is the only reliable signal.
 
 **A `model_join: member` record is the one place to distrust the index.** The description was matched by name rather than by position. It is not arbitrary — the fallback only uses names that mean one thing across the whole model — but if a gap or a rejection you are about to write down rests on such a record, read the declaring shape in the model first and say in the finding that you did.
 
 **Several categories survive into the index and are yours to reject** — tags (which appear as `tags.key`/`tags.value` when modeled as a list of structs), enum fields (ACK emits no enum constraints into the CRD, so they arrive as plain strings), the resource's own primary key, and free-form strings. The reference doc's "What the Index Does Not Handle" is the authority on which. Each must appear under Rejected Candidates with a reason; none of them is filtered out for you.
 
-**Also read `generator.yaml`'s `ignore.field_paths` once.** A suppressed field never reaches the CRD, so it cannot be in the index no matter how the index is built, and a suppression can hide a reference — mq suppresses `CreateBrokerInput.DataReplicationPrimaryBrokerArn`, a Broker→Broker reference. `ack-workspace candidates` prints suppressed identifier-looking fields to stderr as a `note:`, and the orchestrator should have passed you that list. These are not gaps (a `references` block cannot target a field that isn't in the CRD); report them under Discrepancies so a reviewer knows the suppression is hiding one.
+**Account for the suppressed fields.** A field in `generator.yaml`'s `ignore.field_paths` never reaches the CRD, so it cannot be in the index no matter how the index is built, and a suppression can hide a reference — mq suppresses `CreateBrokerInput.DataReplicationPrimaryBrokerArn`, a Broker→Broker reference. Take the list from `PHASE0_LOG` if you were given one (`ack-workspace candidates` writes the identifier-looking ones there as a `note:`); otherwise read `ignore.field_paths` from `generator.yaml` directly. These are not gaps — a `references` block cannot target a field that isn't in the CRD — so report them under Discrepancies, saying for each whether it looks like a hidden reference or a correct suppression.
 
 ### 2. Examine every unconfigured candidate
 

@@ -57,9 +57,15 @@ One entry per unconfigured field judged to be a reference. Omit the section when
          path: <Status.ACKResourceMetadata.ARN | Status.<X>ID | Spec.Name>
      ```
    - **Path rationale:** <why that path matches the form the API echoes back>
+   - **Caveats:** <omit when there are none — anything that makes this gap not a
+     drop-in `references` block: a polymorphic target where only one Kind can be
+     wired, a hand-written hook that would drop the `*Ref` companion, a
+     code-generator limitation, or a prerequisite change in another repo>
 ```
 
 Rules for gap entries:
+
+- **`Caveats` belongs on the gap, not in `Discrepancies`.** A gap that is real but not fixable by adding a `references` block alone is the most expensive kind to mis-file: an implementer picks it up expecting a one-line change. Keeping the blocker attached to the entry means it cannot be read separately from the gap it qualifies.
 
 - **Evidence must be quoted, not summarized.** "Description says it's an IAM role" is not evidence; the sentence is.
 - **`service_name` must be omitted for same-service references.** Emitting it is a compile error, so a proposed config that includes it for a same-service target is itself a defect in the finding.
