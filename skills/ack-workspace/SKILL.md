@@ -68,7 +68,7 @@ message if a prerequisite is missing.
 | `add`    |  yes  |     yes      |       yes       | — |
 | `remove` |  yes  |     yes      |       yes       | — |
 | `release`|  yes  |     yes¹     |       yes       | code-generator in workspace |
-| `deploy` |  yes  |      no      |       no        | AWS creds, kubeconfig, `docker`/`aws`/`kubectl`/`helm`; code-generator in workspace |
+| `deploy` |  yes  |      no      |       no        | AWS creds (may create an EKS cluster), `docker`/`aws`/`kubectl`/`helm`/`eksctl`; code-generator in workspace |
 | `build`  |  yes  |      no      |       no        | `make`/`go` toolchain (+ code-generator build deps); code-generator in workspace |
 | `refresh`|  yes  |     yes²     |       yes       | — |
 | `status` |  yes  |      no      |       no        | — |
@@ -281,17 +281,22 @@ A missing service identifier is a usage error (exit code `2`).
 ### `deploy` — build and deploy a controller from local source
 
 Build a single controller from its **local implementation branch** and deploy it to the
-cluster named by your current kubeconfig context. Use this to test in-progress changes on a
-real cluster. The controller and `code-generator` must be present; `docker`, `aws`,
-`kubectl`, and `helm` must be on `PATH`.
+shared ACK development cluster, `ack-dev-auto`. Use this to test in-progress changes on a real
+cluster. The controller and `code-generator` must be present; `docker`, `aws`, `kubectl`,
+`helm`, and `eksctl` must be on `PATH`.
+
+The target cluster is fixed and your current kubeconfig context is never used as-is — deploy
+repoints the kubeconfig at `ack-dev-auto` every run, and creates the cluster when it is
+absent. See [The development cluster](#the-development-cluster) below.
 
 ```bash
 ack-workspace deploy ecr
 ```
 
 Steps:
-1. resolve the target cluster from `kubectl config current-context`,
-2. resolve your AWS account/region from active AWS credentials,
+1. resolve your AWS account/region from active AWS credentials,
+2. create `ack-dev-auto` if absent, repoint the kubeconfig at it, and ensure the controller's
+   service account and pod identity association,
 3. ensure an ECR repo (`<svc>-controller` by default) exists, **creating it when absent**,
 4. build the image via the code-generator's `./scripts/build-controller-image.sh <svc>`,
    tagging it `<account>.dkr.ecr.<region>.amazonaws.com/<svc>-controller:<HEAD-sha>`,
@@ -303,17 +308,67 @@ By default the image is tagged with the controller's checked-out HEAD short SHA,
 is traceable to the exact local commit. Useful flags:
 
 ```bash
-ack-workspace deploy ecr --dry-run                       # preview; builds/pushes nothing
+ack-workspace deploy ecr --dry-run                       # preview; changes nothing
 ack-workspace deploy ecr --image-tag dev                 # fixed tag instead of HEAD SHA
 ack-workspace deploy ecr --namespace ack-test            # different namespace
 ack-workspace deploy ecr --repository my-ecr-controller  # override ECR repo name
 ack-workspace deploy ecr --region us-west-2              # target a specific region
+ack-workspace deploy ecr --service-account ack-ecr-controller  # bind creds to another account
 ```
 
-> **Caution:** `deploy` installs onto whatever cluster your current kubeconfig points at.
-> Verify with `kubectl config current-context` first, and prefer a local/dev cluster (e.g.
-> KIND) over a shared one. `deploy` may **create** an ECR repository in your AWS account when
-> one is absent.
+> **Caution:** `deploy` may **create** an ECR repository in your AWS account when one is
+> absent, and an EKS cluster when `ack-dev-auto` does not exist. Dry-run first in an account
+> you are unsure about.
+
+#### The development cluster
+
+Every deploy targets `ack-dev-auto` in the region resolved from your AWS configuration. The
+cluster is **not selectable** and the current kubeconfig context is never used as-is: deploy
+repoints the kubeconfig at `ack-dev-auto` on every run, so a deploy cannot land on an
+unintended cluster. When the cluster does not exist, deploy creates it first, making the first
+run a one-time bootstrap.
+
+What the bootstrap creates (via `eksctl create cluster` with a generated config):
+
+- **EKS Auto Mode cluster** with the `general-purpose` and `system` node pools. Auto Mode
+  makes compute, VPC CNI networking, EBS storage, load balancing and CoreDNS built-in
+  capabilities, so there are no node groups or addons to maintain. The Pod Identity Agent is
+  built in as well — do **not** install the `eks-pod-identity-agent` addon on such a cluster.
+- **EKS Pod Identity association** for `ack-system/ack-controller`, bound to IAM role
+  `<cluster>-<namespace>-controller`. Pod Identity injects
+  `AWS_CONTAINER_CREDENTIALS_FULL_URI` and `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, which
+  the AWS SDK picks up automatically. No static secret, and no `eks.amazonaws.com/role-arn`
+  annotation (that is IRSA, a different mechanism).
+- **The shared `ack-controller` service account**, which the controller runs under.
+  Associations are keyed on `(namespace, serviceAccountName)` and support no wildcards, so one
+  shared account lets a single association cover every controller on the cluster. Pass
+  `--service-account` to use a different name and an association is created for that one.
+
+Each step is idempotent: a later deploy only fills in what is missing, so this is also how you
+add an association for a service account that lacks one.
+
+```bash
+ack-workspace deploy ecr --dry-run               # preview, including any cluster creation
+ack-workspace deploy ecr --cluster-version 1.34  # pin k8s version if the cluster is created
+ack-workspace deploy ecr --cluster-policy-arn <arn>  # scope the role down
+```
+
+`--cluster-version` and `--cluster-policy-arn` apply only when the cluster (or its role) has
+to be created; they are ignored once it exists.
+
+> **Caution:** creating the cluster takes 15–25 minutes and creates billable AWS resources
+> (EKS cluster, VPC, IAM role). The role gets `AdministratorAccess` by default so any ACK
+> controller works in a throwaway dev account — scope it with `--cluster-policy-arn`
+> anywhere shared. Verify with
+> `aws eks list-pod-identity-associations --cluster-name ack-dev-auto --region <region>` and
+> `kubectl exec -n ack-system deploy/<deployment> -- env | grep AWS_CONTAINER`.
+
+Tear down when finished, deleting your custom resources first so the controllers clean up
+the AWS resources they created (those do not go away with the cluster):
+
+```bash
+eksctl delete cluster --name ack-dev-auto --region us-west-2
+```
 
 #### Troubleshooting `deploy`
 
@@ -536,12 +591,12 @@ ack-workspace build <svc>             # regenerate types, CRDs, RBAC, Helm chart
 git -C <workspace-root>/<svc>-controller status   # review + commit generated artifacts
 ```
 
-**Test a local change on a cluster:**
+**Test a local change on a cluster (creates `ack-dev-auto` on first run):**
 ```bash
-kubectl config current-context    # confirm target cluster (prefer KIND/dev)
-ack-workspace build <svc>         # regenerate code if generator.yaml/hooks changed
-ack-workspace deploy <svc> --dry-run
-ack-workspace deploy <svc>
+ack-workspace build <svc>             # regenerate code if generator.yaml/hooks changed
+ack-workspace deploy <svc> --dry-run  # preview, including any cluster creation
+ack-workspace deploy <svc>            # ~15-25 min extra the first time
+eksctl delete cluster --name ack-dev-auto --region us-west-2   # when finished with the cluster
 ```
 
 **Cut a release:**
@@ -568,7 +623,9 @@ ack-workspace remove <svc>               # local + fork (prompts)
   whenever a change touches `generator.yaml`, hook templates, or anything affecting generated
   code.
 - Commit or stash feature-branch work before `refresh` (uncommitted changes are discarded).
-- For `deploy`, verify `kubectl config current-context` points at a non-production cluster;
-  note that it can create an ECR repository in your AWS account.
+- For `deploy`, confirm your AWS credentials point at a development account: it creates an
+  ECR repository when absent, and — when `ack-dev-auto` does not exist — an EKS cluster, a
+  VPC, and an IAM role with `AdministratorAccess`. Dry-run first, and delete the cluster when
+  you are done with it. Note that deploy also **rewrites your current kubeconfig context**.
 - For `remove`, prefer `--keep-fork` unless you truly want the fork deleted permanently.
 - Never expect the token to be saved — always supply it via env/flag.
