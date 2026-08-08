@@ -6,15 +6,15 @@ description: >-
   setting up an ACK workspace, adding or removing service controllers, syncing
   forks to upstream, cutting a controller release, regenerating a controller's
   code with the code-generator, building and deploying a controller to a
-  cluster, checking repo status, or building the cross-resource-reference
-  candidate index for a resource.
+  cluster, checking repo status, regenerating a controller's ATTRIBUTION.md, or
+  building the cross-resource-reference candidate index for a resource.
   Covers every command (init, add, remove, refresh, release, build, deploy,
-  status, candidates, config), global flags, configuration,
+  status, candidates, attribution, config), global flags, configuration,
   prerequisites, and safety behavior.
 license: Apache-2.0
 metadata:
   author: ACK Team
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # ack-workspace Guide
@@ -46,8 +46,10 @@ These apply to every command. They are not repeated per section.
 - **Destructive commands confirm first.** `refresh` and `remove` discard local state, so
   they require an interactive `yes` (or `--yes`). Work committed on *other* branches is
   left intact.
-- **Always preview with `--dry-run` before a destructive or bulk run.** It shows exactly
-  what would happen and touches nothing (GitHub, git, filesystem). Dry-run always exits `0`.
+- **Always preview with `--dry-run` before a destructive or bulk run.** It shows what would
+  happen and changes nothing — no GitHub, git, filesystem, or cloud mutation. Read-only
+  lookups still run (resolving your AWS account, checking whether the cluster exists) so the
+  preview reflects reality. Dry-run always exits `0`.
 - **The token is never persisted.** Provide it via `--token` or `GITHUB_TOKEN`; it is never
   written to the config file.
 - **Forks are owned by you.** `remove` only ever deletes a fork under *your* identity; it
@@ -369,9 +371,17 @@ to be created; they are ignored once it exists.
 > **Caution:** creating the cluster takes 15–25 minutes and creates billable AWS resources
 > (EKS cluster, VPC, IAM role). The role gets `AdministratorAccess` by default so any ACK
 > controller works in a throwaway dev account — scope it with `--cluster-policy-arn`
-> anywhere shared. Verify with
-> `aws eks list-pod-identity-associations --cluster-name ack-dev-auto --region <region>` and
-> `kubectl exec -n ack-system deploy/<deployment> -- env | grep AWS_CONTAINER`.
+> anywhere shared.
+
+Verify the association and that its credentials reached the pod. Read the injected variables
+from the pod spec — the controller image is distroless, so `kubectl exec ... -- env` fails with
+`"env": executable file not found`:
+
+```bash
+aws eks list-pod-identity-associations --cluster-name ack-dev-auto --region <region>
+kubectl -n ack-system get pod -l app.kubernetes.io/instance=ack-<svc>-controller \
+  -o jsonpath='{range .items[0].spec.containers[0].env[*]}{.name}{"\n"}{end}' | grep AWS_CONTAINER
+```
 
 Tear down when finished, deleting your custom resources first so the controllers clean up
 the AWS resources they created (those do not go away with the cluster):
@@ -396,39 +406,61 @@ Kind=CustomResourceDefinition: Apply failed with 1 conflict:
 conflict with "kubectl-client-side-apply" using apiextensions.k8s.io/v1: .spec.versions
 ```
 
-The push already succeeded, so point the running Deployment at the built image directly (the
-container is named `controller`; `deploy` tags with the HEAD SHA):
+The push already succeeded, so point the running Deployment at the built image directly. Select
+it by label rather than by name: the chart names the Deployment
+`ack-<svc>-controller-<svc>-chart` (release name plus chart name), not `ack-<svc>-controller`.
+The container inside it *is* named `controller`, and `deploy` tags with the HEAD SHA:
 
 ```bash
+SEL=app.kubernetes.io/instance=ack-<svc>-controller
 TAG=$(git -C <workspace-root>/<svc>-controller rev-parse --short HEAD)
-kubectl -n ack-system set image deployment/ack-<svc>-controller \
+kubectl -n ack-system set image deployment -l "$SEL" \
   controller=<account>.dkr.ecr.<region>.amazonaws.com/<svc>-controller:$TAG
-kubectl -n ack-system rollout status deployment/ack-<svc>-controller
+kubectl -n ack-system rollout status deploy -l "$SEL"
 ```
 
 Do **not** `kubectl delete crd` to clear the conflict — deleting a CRD deletes every custom
 resource of that kind on the cluster. To let helm own the CRDs instead, re-apply them
 server-side first: `kubectl apply --server-side --force-conflicts -f <crds>`.
 
-**A freshly rolled pod crashes with `ExpiredToken`.** Some dev clusters run the controller with
-*static* credentials injected as Deployment env vars
-(`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`) instead of IRSA. Those are
-temporary session credentials; once they expire, any new pod fails at startup while the old pod
-keeps running on credentials it cached at boot:
+**The controller exits at startup with `unable to determine account info`.** It has no AWS
+credentials, which under Pod Identity means the pod was admitted without the association's
+env vars being injected — either no association covers its `(namespace, serviceAccount)` pair,
+or the pod predates the association. Note that credentials are *not* static env vars here;
+there is nothing to refresh.
 
-```
-unable to determine account info: ... GetCallerIdentity ... api error ExpiredToken
-```
-
-Refresh them from your current session without echoing the secret values (the shell expands the
-vars, so the values never appear in the command text or output):
+Check whether the webhook acted on the pod:
 
 ```bash
-eval "$(aws configure export-credentials --format env)"
-kubectl -n ack-system set env deployment/ack-<svc>-controller \
-  AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-  AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-  AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN"
+SEL=app.kubernetes.io/instance=ack-<svc>-controller
+kubectl -n ack-system get pod -l "$SEL" \
+  -o jsonpath='{.items[0].metadata.labels.eks\.amazonaws\.com/pod-identity}{"\n"}'
+```
+
+`enabled` means the injection happened; empty means it did not. Then confirm the association
+exists and which account it covers:
+
+```bash
+aws eks list-pod-identity-associations --cluster-name ack-dev-auto --region <region>
+kubectl -n ack-system get deploy -l "$SEL" \
+  -o jsonpath='{.items[0].spec.template.spec.serviceAccountName}{"\n"}'
+```
+
+If the association exists but the label is empty, the pod started first — restart it so the
+webhook runs on a fresh pod. If no association covers the account, re-run `deploy` (it creates
+one for whatever `--service-account` it deploys under):
+
+```bash
+kubectl -n ack-system rollout restart deploy -l "$SEL"
+```
+
+**Reconciliation fails with `AccessDenied` while the controller is otherwise healthy.** The
+credentials are reaching the pod; the pod identity role simply lacks permission for that
+service's API. This is the expected outcome of scoping the role with `--cluster-policy-arn`.
+Check what the role carries:
+
+```bash
+aws iam list-attached-role-policies --role-name ack-dev-auto-ack-system-controller
 ```
 
 **Regenerating code before a deploy.** A change that touches `generator.yaml` or hook
@@ -492,6 +524,45 @@ Three lines in the stderr output change what a finding may conclude:
 Reads local repos and the public API models: no AWS credentials, git, or GitHub identity
 required. A model that cannot be fetched degrades the index and says so rather than failing
 the run.
+
+### `attribution` — regenerate a controller's ATTRIBUTION.md
+
+Regenerate `ATTRIBUTION.md` with the upstream
+[`attribution-gen`](https://github.com/awslabs/attribution-gen) tool and write the result into
+the local checkout. Accepts a bare alias, the full form, or `all`.
+
+The generation runs on **ephemeral AWS CodeBuild compute**, and that is a requirement rather
+than an optimization: building the document walks the module dependency graph and fetches every
+dependency from the public Go module proxy, which is blocked from inside the Amazon corporate
+network. CodeBuild runs the generator outside it.
+
+```bash
+ack-workspace attribution ecr                 # your fork, current branch
+ack-workspace attribution ecr --ref pr/42     # a pull request head
+ack-workspace attribution ecr --upstream      # the aws-controllers-k8s org
+ack-workspace attribution all                 # every managed controller
+```
+
+By default the build clones **your fork** at the controller's checked-out branch, so push your
+work first — the build reads the remote and cannot see unpushed commits. The command verifies
+the ref is visible on the remote before starting any compute, so an unpushed branch fails fast
+instead of as an opaque CodeBuild source error minutes later. A commit id is exempt from that
+check, because `ls-remote` does not advertise arbitrary commits.
+
+It provisions what it needs on first use (a CodeBuild project, an S3 staging bucket, an IAM
+role) and reports anything it created. Useful flags:
+
+```bash
+ack-workspace attribution ecr --dry-run                  # preview; provisions nothing
+ack-workspace attribution ecr --repo <url>               # clone a specific repository
+ack-workspace attribution ecr --output /tmp/ATTR.md      # write elsewhere (single controller)
+ack-workspace attribution ecr --go-version 1.24          # must exist in the CodeBuild image
+ack-workspace attribution ecr --region us-west-2         # region for CodeBuild
+ack-workspace attribution ecr --timeout 30m              # per-build wait
+```
+
+`--project`, `--role`, and `--bucket` override the provisioned resource names. An empty
+identifier list is a usage error (exit code `2`).
 
 ### `config` — view and persist settings
 
