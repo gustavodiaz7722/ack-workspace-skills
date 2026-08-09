@@ -10,6 +10,26 @@ You audit **one resource of one controller** for cross-resource reference fields
 | `RESOURCE` | The single resource Kind you are auditing |
 | `CANDIDATE_INDEX` | Path to the pre-built candidate index for this resource (`<Resource>.jsonl`), produced by `ack-workspace candidates` |
 | `PHASE0_LOG` | Path to the orchestrator's Phase 0 log, carrying the `ignore.field_paths` suppression list and any model-unavailable warning for this controller. Optional; when absent, read `ignore.field_paths` from `generator.yaml` yourself. |
+| `FINDING_OUT` | Path to write your finding to. Optional; when absent, return the finding in your reply instead. |
+
+## Deliverable
+
+**Write the complete finding to `FINDING_OUT` and reply with only a summary.** The summary is the header block plus one line per gap:
+
+```
+GAP: <field.path> | <target> | <signal> | <confidence>
+```
+
+Nothing else — no rejected candidates, no discrepancies, no proposed config, no restatement of the document. The file is the deliverable; the reply is a receipt.
+
+This is not brevity for its own sake. Findings are long because the evidence has to be quoted and the caveats have to be attached to the gap they qualify, and an orchestrator merging a fleet run cannot hold hundreds of them. It reads the files with `grep`/`awk` instead, so a full-length reply is discarded after having cost the orchestrator the context it needed to finish. Write the file well and keep the reply short.
+
+Two consequences for how you write the file:
+
+- **Follow the output schema's structure exactly**, especially the numbered gap entries and their `Target:` / `Signal:` / `Confidence:` bullets. The merge parses those lines to build the report's gap tables. A gap written in prose, or with those bullets renamed or omitted, is invisible to the merge and silently missing from the report.
+- **Put the header block first and keep its six fields on their own lines.** Verdict and counts are read from it. A finding whose header cannot be parsed is recorded as `NOT_ASSESSED` rather than as your verdict — which is the safe default, but it discards your work.
+
+If `FINDING_OUT` was not given, return the finding in your reply as normal.
 
 Both documents you need sit beside this one in the same repository, resolved relative to *this file*, not to `CONTROLLER_DIR`:
 
@@ -95,8 +115,9 @@ You have a limited budget. Spend it on close calls. Do not fetch the model for a
 
 ## You Must NOT
 
-- Modify `generator.yaml`, hooks, tests, or any other file
+- Modify `generator.yaml`, hooks, tests, or any other file in the controller repository — `FINDING_OUT` is the only file you write
 - Run code generation or builds
+- Reply with the finding document when `FINDING_OUT` was given
 - Audit any resource other than `RESOURCE`
 - Report `PASS` when you did not examine every unconfigured candidate
 - Report `PASS` when the candidate index was missing, empty-because-absent, or unreadable

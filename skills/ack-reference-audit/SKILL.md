@@ -53,10 +53,18 @@ Then judge each candidate against the signal hierarchy in the reference doc. `is
 
 ## Auditing at Scale
 
-One resource at a time, in parallel. The [`audit-references`](../../workflows/audit-references.md) workflow builds every index in one command, fans out one auditor per resource in bounded waves, and merges the findings into a single report. The per-resource unit matters: auditing twenty resources in one conversation degrades badly toward the end, and nothing in the output reveals that it did.
+One resource at a time, in parallel. The [`audit-references`](../../workflows/audit-references.md) workflow builds every index in one command, fans out one auditor per resource in bounded waves, and merges the findings into one report per controller plus a fleet index. The per-resource unit matters: auditing twenty resources in one conversation degrades badly toward the end, and nothing in the output reveals that it did.
+
+Two rules make a large run finish, and both are about the orchestrator rather than the auditors — auditors stay uniformly thorough however many there are; it is the session holding the loop that fails:
+
+- **Auditors write their finding to a file and reply with a summary.** A finding is long by design, and hundreds of them will not fit in the session that has to merge them.
+- **The merge is mechanical and per controller.** `scripts/merge-reference-findings.sh` derives every table from the finding files with `grep`/`awk`, so merging costs no context, and it emits one report per controller because a single fleet-wide document with every finding inline is navigable by nobody.
+
+Findings and indexes are both files on disk, so a run stopped at any point resumes without repeating work — prefer stopping at a controller boundary.
 
 - Auditor SOP: [roles/reference-auditor.md](../../roles/reference-auditor.md)
 - Output schema: [roles/schemas/reference-audit-output.md](../../roles/schemas/reference-audit-output.md)
+- Merge script: [scripts/merge-reference-findings.sh](../../scripts/merge-reference-findings.sh)
 - Claude Code subagent: [agents/ack-reference-auditor.md](../../agents/ack-reference-auditor.md)
 
 ## Where the Gaps Actually Are

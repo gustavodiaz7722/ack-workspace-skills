@@ -1,6 +1,6 @@
 # Workflow: Audit Cross-Resource References
 
-Audit one controller, or the whole fleet, for CRD fields that should be cross-resource references but aren't. Fans out one independent auditor per resource and merges the findings into a single report.
+Audit one controller, or the whole fleet, for CRD fields that should be cross-resource references but aren't. Fans out one independent auditor per resource, each writing its finding to a file, then merges those files mechanically into one report per controller plus a fleet index.
 
 This is a **read-only audit**. It produces findings and proposed config; it changes nothing.
 
@@ -57,9 +57,21 @@ For each resource index, dispatch one **Reference Auditor** (`roles/reference-au
 > CONTROLLER_DIR={CONTROLLER_DIR} RESOURCE={Kind}
 > PHASE0_LOG={OUT_DIR}/phase0.log
 > CANDIDATE_INDEX={OUT_DIR}/{alias}/{Kind}.jsonl
-> Produce a per-resource finding following roles/schemas/reference-audit-output.md.
+> FINDING_OUT={OUT_DIR}/findings/{alias}/{Kind}.md
+> Write your complete finding to FINDING_OUT following roles/schemas/reference-audit-output.md.
+> Reply with **only** the header block plus one `GAP: <path> | <target> | <signal> | <confidence>`
+> line per gap. Do not reply with the document, the rejected candidates, or the discrepancies.
 
 An auditor needs no model path: the index already carries the resolved description and pattern for every candidate, along with `model_join` saying how each was matched.
+
+**The finding goes to a file and only a summary comes back.** This is the single constraint that makes a fleet run survivable, and it is not an optimization. A finding is long by design — quoted evidence, proposed config, path rationale, caveats — and an orchestrator that lets 268 of them into its context runs out of room before Phase 2 and starts truncating its own audit without saying so. Phase 2 reads the files with `grep`/`awk` instead, so the orchestrator pays for the summary and nothing more.
+
+Create the finding directories before dispatching, so an auditor never fails on a missing path:
+
+```bash
+awk '{print $1}' <(cd "$OUT_DIR" && find . -mindepth 2 -maxdepth 2 -name '*.jsonl' \
+  | sed 's|^\./||; s|/.*||') | sort -u | while read -r a; do mkdir -p "$OUT_DIR/findings/$a"; done
+```
 
 **Dispatch in waves rather than all at once.** The orchestrator is the practical concurrency bound: neither Claude Code nor Kiro documents a sub-agent cap, and a 268-way fan-out is hard to monitor and expensive to redo if the batch is wrong. Launch a wave, collect it, launch the next. Suggested sizing:
 
@@ -73,49 +85,82 @@ Batch fleet runs **by controller**, so a partial run still yields complete contr
 
 ### Collecting Results
 
-For each auditor, record the finding **and** whether it returned usably. Three outcomes, all of which must survive into the report:
+You do not need to track results yourself: **the presence of a finding file is the record.** Phase 2 derives every verdict and gap from the files, and a resource with a candidate index but no finding file is `NOT_ASSESSED` by construction. Read each auditor's summary to see how the wave went, then move on — do not transcribe the summaries into a running tally, and do not read the finding files to check them.
 
-| Outcome | Record as |
-|---------|-----------|
-| Structured finding, `PASS` or `FAIL` | that verdict |
-| Structured finding, `NOT_ASSESSED` | `NOT_ASSESSED` with the auditor's stated reason |
-| Failed, timed out, or unparseable | `NOT_ASSESSED` with the failure reason |
+Three outcomes, all of which survive into the report without any bookkeeping:
 
-**A missing or failed result is never a pass.** An auditor that crashed tells you nothing about the resource, and recording it as clean is a false negative on a resource nobody examined. Retry a failed auditor at most once; if it fails again, record `NOT_ASSESSED` and continue — one bad resource must not abort the batch.
+| Outcome | How it lands in the report |
+|---------|----------------------------|
+| Finding written, `PASS` or `FAIL` | that verdict, parsed from the file |
+| Finding written, `NOT_ASSESSED` | `NOT_ASSESSED` with the auditor's stated reason |
+| Failed, timed out, or wrote nothing | `NOT_ASSESSED` — no file, so the merge reports the resource as unaudited |
 
-## Phase 2: Merge
+**A missing or failed result is never a pass.** An auditor that crashed tells you nothing about the resource, and recording it as clean is a false negative on a resource nobody examined. Retry a failed auditor at most once; if it fails again, leave the file absent and continue — one bad resource must not abort the batch.
 
-Assemble the merged report per `roles/schemas/reference-audit-output.md`:
+One case needs care: an auditor whose dispatch was interrupted may still have written a complete finding before it stopped. Do not assume either way. `merge-reference-findings.sh` treats any file whose header lacks a parsable verdict as `NOT_ASSESSED`, so a partial write cannot be counted as a pass — but a *complete* file from an interrupted auditor is real work and is included. If you interrupted a wave, check which files appeared:
 
-1. Verdict counts, including `NOT_ASSESSED`.
-2. Gaps pooled across resources, grouped by confidence, highest first.
-3. The `Not Assessed` table — mandatory whenever any resource did not complete.
-4. Per-resource findings verbatim.
-5. Recommended sequencing, batched by target service (each cross-service target adds one `go.mod` dependency, so one PR per target service keeps dependency changes reviewable).
+```bash
+comm -13 <(sort "$OUT_DIR/.merge/done.txt") <(cd "$OUT_DIR" && find . -mindepth 2 -maxdepth 2 \
+  -name '*.jsonl' -not -path './findings/*' | sed 's|^\./||;s|\.jsonl$||' | sort)
+```
 
-Write to `$OUT_DIR/reference-audit-report.md`.
+## Phase 2: Merge (mechanical — do not read the findings)
 
-**Take the report date from `date -u +%F`.** Do not write one from memory — a model's sense of the current date is unreliable, and a report stamped with the wrong date is hard to place against the `generator.yaml` state it describes.
+One command, and it is the only supported way to merge:
 
-The orchestrator aggregates; it does not re-judge. Do not upgrade or downgrade a confidence level you did not investigate yourself.
+```bash
+<skills-repo>/scripts/merge-reference-findings.sh "$OUT_DIR"
+```
+
+It writes **one report per controller** plus a **thin fleet index**:
+
+```
+$OUT_DIR/reports/<alias>.md          per-controller report, findings verbatim
+$OUT_DIR/reference-audit-index.md    fleet index: totals, coverage, gap tables, no findings
+$OUT_DIR/.merge/                     intermediate TSVs, kept so the numbers are inspectable
+```
+
+**Per-controller, not per-fleet.** A single document containing every finding verbatim runs to tens of thousands of lines and nobody can navigate it; the controller is also the unit a fix ships in, since one `generator.yaml` and one `go.mod` belong to one controller. The fleet index carries the cross-controller view — coverage, pooled gap tables, sequencing by target — and deliberately contains no findings, so it stays readable at any scope.
+
+**Do not read a finding to assemble this, and do not hand-write the tables.** Everything is derived by `grep`/`awk` over the files: verdicts and counts from the header block, gap rows from the numbered entries in the Gaps section, `NOT_ASSESSED` from indexes that have no finding file. Deriving it mechanically is what keeps the report from drifting from the findings, and it is what lets the merge cost nothing in context. The script takes the date from `date -u +%F` for the same reason: a model's sense of the current date is unreliable, and a report stamped with the wrong date is hard to place against the `generator.yaml` state it describes.
+
+Two things to check in the output:
+
+- **A parse warning means the tables are incomplete.** If findings declare more gaps in their headers than the merge could parse, some Gaps section does not follow the schema's numbered-entry form. The script says so in the index and on stderr. Fix the finding or note the discrepancy; do not publish the counts as if they reconciled.
+- **Controllers with no findings appear in the index as `not audited`** with their full resource count under `NOT_ASSESSED`. That is the intended record of an incomplete run, not a defect.
+
+The merge aggregates; it does not re-judge. No confidence level, target, or caveat is re-evaluated — those belong to the auditor that wrote them. If you want to add cross-cutting analysis (a recommended order across controllers, a defect that shows up in several findings), append it as prose under the index's sequencing section and say it is yours.
 
 ## Phase 3: Report
 
 Give the user:
 
-1. **Scope and totals** — resources audited, PASS/FAIL/NOT_ASSESSED counts, total gaps by confidence
-2. **The highest-confidence gaps** — a handful, not the whole table
-3. **What was not assessed, and why** — state this plainly rather than burying it
-4. **Report path**
+1. **Scope and totals** — resources audited out of total, PASS/FAIL/NOT_ASSESSED counts, gaps by confidence. Take these from the fleet index; do not recount.
+2. **The highest-confidence clusters** — a handful of controllers or resources, not the whole table
+3. **What was not assessed, and why** — state this plainly rather than burying it. If the run was partial, say so in the first line.
+4. **Paths** — the fleet index, and the per-controller reports directory
 5. **Suggested next step** — which gap batch to implement first, and that implementing it means editing `generator.yaml`, regenerating, and verifying per `skills/ack-reference-audit/references/cross-resource-references.md`
 
 Do not offer to implement gaps as part of this workflow. Auditing and implementing are separate; a reviewer should see the audit before code changes land.
 
+## Resuming a Partial Run
+
+A stopped run resumes cleanly, because the candidate indexes and the finding files are both on disk. Phase 0 does not repeat, and completed resources are not re-audited.
+
+```bash
+# what is left to audit
+comm -13 <(cd "$OUT_DIR" && find findings -mindepth 2 -name '*.md' | sed 's|findings/||;s|\.md$||' | sort) \
+         <(cd "$OUT_DIR" && find . -mindepth 2 -maxdepth 2 -name '*.jsonl' -not -path './findings/*' \
+             | sed 's|^\./||;s|\.jsonl$||' | sort)
+```
+
+Dispatch waves over that list, then re-run the merge — it is idempotent and rebuilds every report from whatever findings exist at the time. Prefer finishing a partially-audited controller before starting a new one, so a stopping point always leaves whole controllers behind.
+
 ## Claude Code Execution
 
-Each dispatch maps to spawning the `ack-reference-auditor` subagent (`agents/ack-reference-auditor.md`) with the resource's index path. The main session holds the wave loop and the collected findings.
+Each dispatch maps to spawning the `ack-reference-auditor` subagent (`agents/ack-reference-auditor.md`) with the resource's index path and its `FINDING_OUT` path. The main session holds the wave loop only — the findings live on disk, not in the session.
 
-Keep the fan-out one level deep: orchestrator → N auditors. Do not build a per-controller orchestrator that itself fans out per resource; flatten to a single dispatch loop over `(controller, resource)` pairs.
+Keep the fan-out one level deep: orchestrator → N auditors. Do not build a per-controller orchestrator that itself fans out per resource; flatten to a single dispatch loop over `(controller, resource)` pairs. Note that per-controller *reporting* is not per-controller *orchestration* — the merge groups by controller after the fact, from one flat dispatch loop.
 
 ## Kiro Execution
 
@@ -125,15 +170,18 @@ Kiro runs sub-agents in parallel, each with its own isolated context, and the ma
 Execute the Reference Auditor role at <repo>/roles/reference-auditor.md,
 following the schema at <repo>/roles/schemas/reference-audit-output.md.
 CONTROLLER_DIR=... RESOURCE=Nodegroup CANDIDATE_INDEX=/tmp/ref-audit/eks/Nodegroup.jsonl
+FINDING_OUT=/tmp/ref-audit/findings/eks/Nodegroup.md
+Write the finding to FINDING_OUT and reply with only the header block plus GAP lines.
 ```
 
 Delegation is model-driven from the prompt rather than a CLI flag, so state the unit of work ("one sub-agent per resource, in parallel") explicitly.
 
-Three things to get right:
+Four things to get right:
 
-- **Sub-agents inherit the parent's permissions** but isolate conversation history and context. Auditors only read the index and grep/jq over it — Phase 0 is the orchestrator's job, not theirs — so pre-approve reads plus `grep`/`jq`. A non-interactive sub-agent that hits an approval prompt fails fast rather than waiting.
+- **Sub-agents inherit the parent's permissions** but isolate conversation history and context. Auditors read the index, grep/jq over it, and write one file — Phase 0 is the orchestrator's job, not theirs — so pre-approve reads, `grep`/`jq`, and a write to `FINDING_OUT`. A non-interactive sub-agent that hits an approval prompt fails fast rather than waiting.
 - **Supervised mode prompts before actions**, so a wide fan-out there is prompt-heavy. Autopilot is the practical mode for a fleet run, though nothing restricts sub-agents to it.
 - Kiro's docs do not specify a sub-agent concurrency cap, so treat the wave sizes above as prudence rather than a documented limit, and batch fleet runs per controller regardless.
+- **Do not call a file-reading tool on a finding.** This is the failure mode to watch for in Kiro specifically: reading the finding you just dispatched feels like verifying the work, and it is what exhausts the orchestrator. Verify a wave with `ls`/`wc -l` over `findings/` if you want confirmation the files landed, and leave the contents to Phase 2.
 
 Wrapping the role as a Kiro custom agent in `~/.kiro/agents/` would save repeating the SOP path, but it is an optimization, not a prerequisite: note that Kiro custom agents load no skills by default, so such a definition needs an explicit `skill://` resource or it runs without the ACK guidance its SOP depends on.
 
@@ -142,12 +190,15 @@ Wrapping the role as a Kiro custom agent in `~/.kiro/agents/` would save repeati
 If you are running somewhere without delegation, the fan-out becomes a serial loop, and two things change:
 
 1. **Re-read `roles/reference-auditor.md` before each resource** and treat each as a fresh audit. The role's scope boundary is doing real work — it stops resource N's findings from bleeding into resource N+1.
-2. **Cap the batch.** Serial auditing degrades as context fills. Audit at most 5–8 resources per session, write the findings out, then start a new session. A session that tries to audit all 20 ec2 resources produces thorough findings for the first few and increasingly thin ones after, with nothing in the output revealing it.
+2. **Cap the batch.** Serial auditing degrades as context fills. Audit at most 5–8 resources per session, write each finding to its `FINDING_OUT` path as you go, then start a new session. A session that tries to audit all 20 ec2 resources produces thorough findings for the first few and increasingly thin ones after, with nothing in the output revealing it.
 
-The candidate indexes are files on disk, so a batch interrupted at any point resumes cleanly — Phase 0 does not need repeating.
+Write findings to disk here too, for the same reason a delegating run does: the merge reads files, so a serial run spread across five sessions merges exactly like a parallel one. Run `merge-reference-findings.sh` once at the end, not per session.
+
+The candidate indexes and findings are files on disk, so a batch interrupted at any point resumes cleanly — Phase 0 does not need repeating, and neither does any completed resource.
 
 ## Notes
 
-- Phase 0 needs network access for model enrichment. Without it the audit still runs, but nested fields lose their documentation and every finding on a nested field drops in confidence. Record `Model enrichment: no` in the report rather than pretending the coverage is equivalent.
+- **The orchestrator's context is the binding constraint on a fleet run, not the auditors'.** Auditors are independent and uniformly thorough however many there are; what fails is the session holding the loop. Both the write-to-file dispatch and the mechanical per-controller merge exist for that one reason. If a fleet run still runs short, stop at a controller boundary, merge, and resume — do not compensate by asking auditors for less depth.
+- Phase 0 needs network access for model enrichment. Without it the audit still runs, but nested fields lose their documentation and every finding on a nested field drops in confidence. The merge reports `Model enrichment: N of N` per controller from the findings' own header blocks, so a degraded run is visible rather than implied.
 - The audit is idempotent and read-only. Re-running after a `generator.yaml` change is the intended way to verify a fix: the fixed field flips to `is_reference: true` in the index and leaves the gap list.
 - This workflow finds fields that *should* be references. Verifying that references *added* by a PR actually resolve on a live cluster is a separate, post-implementation activity with its own live-cluster pass criteria.

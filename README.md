@@ -57,7 +57,8 @@ The roles, workflows, and agents directories sit at the repo root and are refere
 
 ```
 scripts/
-└── install-skills.sh           # symlink skills into a Kiro skills dir; --check verifies
+├── install-skills.sh           # symlink skills into a Kiro skills dir; --check verifies
+└── merge-reference-findings.sh # assemble audit reports from findings, one per controller
 
 skills/ack-workspace/           # CLI reference
 └── SKILL.md
@@ -68,12 +69,12 @@ skills/ack-reference-audit/     # Agent Skill directory
     └── cross-resource-references.md   # Identifying gaps, and remediating them
 
 workflows/
-└── audit-references.md         # Build indexes → fan out one auditor per resource → merge report
+└── audit-references.md         # Build indexes → fan out one auditor per resource → merge per controller
 
 roles/                          # Tool-agnostic role SOPs
 ├── reference-auditor.md        # Per-resource audit methodology and obligations
 └── schemas/
-    └── reference-audit-output.md      # Per-resource finding + merged report shape
+    └── reference-audit-output.md      # Finding, per-controller report, and fleet index shapes
 
 agents/
 └── ack-reference-auditor.md    # Claude Code subagent definition
