@@ -14,6 +14,7 @@ How to find CRD fields that should be cross-resource references but aren't, and 
   - Nested Fields Are Where the Gaps Are
 - Part 2: Remediating
   - The generator.yaml Config
+  - Polymorphic Targets Are Not Wireable
   - References Inside a Custom Field
   - Choosing `path`
   - Same-Service vs Cross-Service
@@ -169,6 +170,7 @@ The index gives you one description and one pattern per field. Two situations ar
 
 - The record carries **`model_join: member`**, so the field's position did not confirm the description. Read the shape that actually declares the member.
 - You need something the record does not carry — the member's `required` status, an enum's member list, a sibling that constrains the field's meaning, or which of several shapes a polymorphic value can name.
+- You suspect the field is **polymorphic**, which decides whether it can be wired at all. The index carries one description per field and cannot see that the field's *shape* is shared with members documented for a different resource type. See [Polymorphic Targets Are Not Wireable](#polymorphic-targets-are-not-wireable) for the checks.
 
 Fetch the model once (`candidates` caches its own copy, but a shell needs its own):
 
@@ -240,6 +242,54 @@ Use the **generator.yaml field path** (the API/Pascal naming, dot-separated for 
 | `path` | yes | Where in the target CR to read the identifier from |
 | `service_name` | cross-service only | The referenced controller's service. **Omit for same-service.** |
 | `skip_resource_state_validations` | rarely | Skip the "target exists and is synced" check. Cyclic references only. |
+
+### Polymorphic Targets Are Not Wireable
+
+**A field that can hold the identifier of more than one resource type does not get a `references` block. Omit it.** This is a hard blocker in the code-generator, not a judgment call and not a matter of picking the most likely target.
+
+The generator accepts exactly one target per field. `ReferencesConfig` carries scalar `Resource` and `ServiceName`, and the field's `References` is a single pointer rather than a slice:
+
+```go
+type ReferencesConfig struct {
+	ServiceName string `json:"service_name,omitempty"`
+	Resource    string `json:"resource"`
+	...
+}
+References *ReferencesConfig `json:"references,omitempty"`
+```
+
+There is consequently no syntax for "either of these Kinds", and the generated resolver closes the door at the code level: it declares one concrete Go type and calls that Kind's getter.
+
+```go
+obj := &svcapitypes.ServerlessCacheSnapshot{}
+if err := getReferencedResourceState_ServerlessCacheSnapshot(ctx, apiReader, obj, *arr.Name, namespace); err != nil {
+```
+
+So wiring one Kind of a polymorphic field does not add support for that field — it adds support for one arm of it and silently privileges that arm. The `*Ref` companion is named for the field, not the target, so nothing in the CRD tells a user which of the accepted types their `*Ref` may point at. Worse, the either/or validation is per field: `validateReferenceFields` rejects a resource that sets both the `*Ref` and the concrete field, so a user who needs two different target types in one list cannot use the reference at all and must supply every element concretely.
+
+**What to do instead.** Report it as a gap — it is a real usability gap, and the field genuinely holds another resource's identifier — but record it as not wireable and emit no proposed config. The concrete field already accepts every accepted type, so omitting the reference costs users nothing they have today. Name the alternatives you found in the caveat, so a future change that decides how to express polymorphic targets starts from the enumeration rather than redoing it.
+
+**How to recognize one.** No single tell is conclusive; two together usually are:
+
+| Signal | Example |
+|--------|---------|
+| The member's own documentation is **unqualified** where siblings are specific | `SnapshotArnsToRestore`: "The ARN(s) of the snapshot that the new serverless cache will be created from" — which snapshot Kind? |
+| The doc **enumerates** alternatives | eventbridge `Rule.targets.arn`, lambda `...destinationConfig.onFailure.destination` ("sns Topic, sqs Queue, s3 Bucket") |
+| The field **reuses a shape** whose other members are documented for a different resource type | `SnapshotArnsToRestore` targets `SnapshotArnsList`, shared with `CreateCacheCluster.SnapshotArns` and `CreateReplicationGroup.SnapshotArns`, both documented as **Amazon S3 RDB object ARNs** (`arn:aws:s3:::my_bucket/snapshot1.rdb`) |
+| A `resourceType`/`destinationType` **sibling** selects the meaning | ec2 `FlowLog.logDestination`, switched by `logDestinationType` |
+| No `pattern` where an ARN field would carry one | a union-typed ARN cannot be constrained by one template |
+
+The shared-shape check is the one most easily missed and the one that catches fields whose own documentation looks clean. Walk the member to its target shape and list every other member pointing at it:
+
+```bash
+jq -r --arg t 'SnapshotArnsList' '.shapes | to_entries[] | .key as $k | (.value.members // {}) | to_entries[]
+       | select(.value.target | endswith("#" + $t))
+       | "\($k | split("#")[-1]).\(.key)"' /tmp/elasticache.json
+```
+
+If the members that share the shape are documented for different resource types, the field is polymorphic even when its own sentence reads unambiguously.
+
+**One resource type described loosely is not polymorphism.** elasticache `Snapshot.cacheClusterID` says "The identifier of an existing cluster", and the replication-group case is a *separate* field on the same operation — two monomorphic fields, not one polymorphic one. Check whether the alternatives are sibling fields before concluding the field itself is a union.
 
 ### References Inside a Custom Field
 
@@ -589,6 +639,7 @@ A non-zero count is a `FAIL` even with all four conditions green, and the count 
 - **`service_name` on a same-service reference** breaks the build with an unresolved `<service>apitypes` import. The most common mistake, and the error message doesn't point at generator.yaml.
 - **Wrong `path`** generates and compiles cleanly, then fails at runtime — empty on the target gives `ResourceReferenceMissingTargetFieldFor`, and the wrong *form* (bare ID where the API returns an ARN) gives a delta that never clears.
 - **A nested reference usually needs more than a `references` block.** On its own it may vanish from the spec after one reconcile, or leave the resource in a permanent diff. Pair it with `set: ignore` on Create/Update and `late_initialize` with `skip_incomplete_check`.
+- **A polymorphic field never gets a `references` block.** The generator takes one `resource` per field and the resolver instantiates one concrete Kind, so wiring one arm of a union privileges it invisibly and blocks mixed-type lists outright. Report the gap, record it as not wireable, propose no config. Check the field's *shape* for reuse by members documented for other resource types — that catches the ones whose own description reads clean.
 - **A `custom_field` parent does not block a reference on its members.** Only ec2 and route53resolver do this today, so it looks unprecedented on a casual grep — it isn't. Nor does acronym casing in the key matter; both `Routes.GatewayId` and `Routes.VPCPeeringConnectionID` resolve.
 - **A `Name`-suffixed field is usually the resource's own name.** Require a description that names a *different* resource type before treating it as a reference.
 - **Don't add a reference to a document field.** `is_document`/`is_iam_policy` and `references` describe incompatible contents.

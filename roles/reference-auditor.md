@@ -96,6 +96,8 @@ For each gap, identify the referenced Kind and owning service. A gap you cannot 
 
 Verify the target is an ACK-managed resource: check that a `<service>-controller` exists and declares that Kind in its `generator.yaml`. A reference to a Kind no controller manages cannot be configured.
 
+**Then check whether the field accepts more than one resource type.** A polymorphic field cannot be wired at all — the generator takes one `resource` per field — so it is `Wireable: no (polymorphic)` with no proposed config. Two checks the index cannot do for you: read whether the member's own description is unqualified or enumerates alternatives, and walk the member to its target *shape* to see whether other members pointing at the same shape are documented for a different resource type. The second one catches fields whose own sentence reads unambiguously. A sibling field covering the other type means two monomorphic fields, not one polymorphic one. The reference doc's [Polymorphic Targets Are Not Wireable](../skills/ack-reference-audit/references/cross-resource-references.md#polymorphic-targets-are-not-wireable) has the full list of tells.
+
 ### 4. Choose the `path`, and justify it
 
 The `path` must resolve to the same **form** the resource's Describe API returns for that field. This is the single most common way a reference ships broken: a `path` yielding a bare ID where the API echoes a full ARN produces a perpetual delta and the resource never converges. State the rationale in the finding.
@@ -109,6 +111,7 @@ You have a limited budget. Spend it on close calls. Do not fetch the model for a
 - **`generator.yaml` is authoritative for "already configured."** Do not infer configured-ness from the CRD's `*Ref` fields; sibling fields collapse onto the same companion name, so a companion cannot tell you which field owns it. If you notice a companion the markings do not explain, report it under Discrepancies as something to investigate, not as a conclusion.
 - **Immutable and primary-key fields are candidates.** A reference is frequently immutable, and a sub-resource's primary key is frequently a reference to its parent.
 - **The resource's own identifier is not a reference.** Its own name/ID/ARN is what it *is*, not what it points at.
+- **A polymorphic field is a gap, but never a wireable one.** Report it, mark it `Wireable: no (polymorphic)`, enumerate the candidate types in `Caveats`, and propose no config. Do not pick the most likely target and wire it — one arm of a union generates cleanly, passes a naive test, and quietly privileges that arm while blocking every user who needs one of the others.
 - **Documents are not references.** A field marked `is_document` / `is_iam_policy` holds a document, not an identifier, so reject it on the marking. These are kept in the index rather than filtered out, so that the misconfiguration where one *also* carries a `references` block stays visible — if you see `is_reference: true` on a document field, report it under Discrepancies.
 - **Nested fields deserve more suspicion than top-level ones.** Top-level ARN fields are usually wired up already; the gaps concentrate in nested structures.
 - **Quote your evidence.** A confidence level without a quoted pattern or description sentence is not a finding.
@@ -122,4 +125,5 @@ You have a limited budget. Spend it on close calls. Do not fetch the model for a
 - Report `PASS` when you did not examine every unconfigured candidate
 - Report `PASS` when the candidate index was missing, empty-because-absent, or unreadable
 - Include `service_name` in a proposed config for a same-service target
+- Propose a `references` block for a field that accepts more than one resource type
 - Invent a target Kind you have not confirmed exists in an ACK controller

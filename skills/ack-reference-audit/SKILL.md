@@ -73,6 +73,14 @@ Top-level ARN fields are usually wired up already — they are visible in the CR
 
 Nested fields are also the ones ACK does not document: descriptions are propagated into the CRD only for top-level spec fields, so a nested member arrives as a bare `type: string`. That is why the audit needs the service's API model, and why the index resolves it for you.
 
+## Polymorphic Fields Are Never Wired
+
+A field that can hold the identifier of more than one resource type does not get a `references` block. The code-generator takes exactly one `resource` per field and the generated resolver instantiates one concrete Kind, so there is no way to express the alternatives — wiring one arm of a union privileges it invisibly, and because the ref/concrete either-or is per field, it locks out any user who needs a mixed-type list.
+
+Such a field is still reported as a gap, marked `Wireable: no (polymorphic)`, with the candidate types enumerated and **no proposed config**. The concrete field already accepts every type, so omitting the reference costs users nothing.
+
+The tell that is easiest to miss is shape reuse: the field's own description can read perfectly unambiguous while its target *shape* is shared with members documented for a different resource type. [Polymorphic Targets Are Not Wireable](references/cross-resource-references.md#polymorphic-targets-are-not-wireable) has the checks.
+
 ## Three Things That Make an Audit Wrong
 
 - **A resource that could not be indexed is not a passing resource.** `NOT_ASSESSED` and `PASS` are distinct verdicts, and conflating them records a clean bill of health for a resource nobody examined.

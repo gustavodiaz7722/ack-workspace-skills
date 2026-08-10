@@ -70,15 +70,19 @@ One entry per unconfigured field judged to be a reference. Omit the section when
          path: <Status.ACKResourceMetadata.ARN | Status.<X>ID | Spec.Name>
      ```
    - **Path rationale:** <why that path matches the form the API echoes back>
+   - **Wireable:** <omit when yes — otherwise: `no (polymorphic)`, and then no
+     Proposed config above>
    - **Caveats:** <omit when there are none — anything that makes this gap not a
-     drop-in `references` block: a polymorphic target where only one Kind can be
-     wired, a hand-written hook that would drop the `*Ref` companion, a
-     code-generator limitation, or a prerequisite change in another repo>
+     drop-in `references` block: a hand-written hook that would drop the `*Ref`
+     companion, a code-generator limitation, or a prerequisite change in another
+     repo>
 ```
 
 Rules for gap entries:
 
 - **`Caveats` belongs on the gap, not in `Discrepancies`.** A gap that is real but not fixable by adding a `references` block alone is the most expensive kind to mis-file: an implementer picks it up expecting a one-line change. Keeping the blocker attached to the entry means it cannot be read separately from the gap it qualifies.
+
+- **A polymorphic target is `Wireable: no (polymorphic)` and carries no proposed config.** A field that can hold more than one resource type cannot be expressed: the generator takes one `resource` per field and the resolver instantiates one concrete Kind, so wiring one arm privileges it invisibly and blocks mixed-type lists. It is still a gap — the field does hold another resource's identifier — but it is not actionable, and a proposed config for it is a defect in the finding, not a suggestion. Enumerate the candidate types in `Caveats` so a later change that decides how to express polymorphism starts from that list. Set `Target:` to the most likely type with `(polymorphic — see Caveats)` appended, or `unidentified` when no single type dominates. See [Polymorphic Targets Are Not Wireable](../../skills/ack-reference-audit/references/cross-resource-references.md#polymorphic-targets-are-not-wireable).
 
 - **Evidence must be quoted, not summarized.** "Description says it's an IAM role" is not evidence; the sentence is.
 - **`service_name` must be omitted for same-service references.** Emitting it is a compile error, so a proposed config that includes it for a same-service target is itself a defect in the finding.
@@ -145,13 +149,15 @@ Anything that needs a human eye, including index anomalies. Omit when empty.
 | FAIL | N |
 | NOT_ASSESSED | N |
 
-**Total gaps:** N across N resources (high: N, medium: N, low: N)
+**Total gaps:** N across N resources — **N wireable** (high: N, medium: N, low: N) and **N not wireable**
 
 | Resource | Verdict | Candidates | Configured | Gaps |
 |---|---|---:|---:|---:|
 | Nodegroup | FAIL | 34 | 3 | 2 |
 
 ## Gaps by Confidence
+
+Wireable gaps only — a gap no `references` block can express is listed under Not Wireable instead.
 
 ### High Confidence
 
@@ -161,6 +167,12 @@ Anything that needs a human eye, including index anomalies. Omit when empty.
 
 ### Medium Confidence / ### Low Confidence
 <same table>
+
+## Not Wireable
+
+| Resource | Field Path | Target | Confidence | Reason |
+|---|---|---|---|---|
+| Pipe | `target` | unidentified (polymorphic — ...) | medium | polymorphic |
 
 ## Not Assessed
 
@@ -203,13 +215,16 @@ The per-resource findings are reproduced **verbatim**. The tables above them are
 
 ## Coverage by Controller
 
-| Controller | Audited | PASS | FAIL | NOT_ASSESSED | Gaps | Report |
-|---|---:|---:|---:|---:|---:|---|
-| eks | 8 of 8 | 6 | 2 | 0 | 5 | [`reports/eks.md`](reports/eks.md) |
-| ec2 | 0 of 20 | 0 | 0 | 20 | — | _not audited_ |
+| Controller | Audited | PASS | FAIL | NOT_ASSESSED | Wireable | Not wireable | Report |
+|---|---:|---:|---:|---:|---:|---:|---|
+| eks | 8 of 8 | 6 | 2 | 0 | 5 | 1 | [`reports/eks.md`](reports/eks.md) |
+| ec2 | 0 of 20 | 0 | 0 | 20 | — | — | _not audited_ |
 
 ## Fleet Gaps by Confidence
-<the same three tables, with a Controller/Resource column>
+<the same three tables, with a Controller/Resource column; wireable gaps only>
+
+## Fleet Gaps That Are Not Wireable
+<one pooled table, with a Reason column>
 
 ## Fleet Sequencing by Target
 
@@ -235,4 +250,6 @@ These are enforced by `merge-reference-findings.sh`; they are documented here be
 - **Reconcile the gap count.** Gap rows are parsed from the numbered entries; the header blocks separately declare a gap count. If the two disagree, some finding does not follow Part 1's structure — emit the parse warning rather than publishing counts that do not add up.
 - **Do not re-judge findings.** The merge aggregates and sequences; it does not upgrade or downgrade a confidence level, retarget a gap, or drop a caveat. Cross-cutting analysis added by the orchestrator is appended as prose and attributed as its own.
 - **Count gaps, not fields.** One field with two plausible targets is one gap with the alternatives noted.
+- **Separate wireable gaps from gaps that cannot be expressed.** Only the wireable count is work someone can pick up, so the confidence tables and the sequencing tables are built from wireable gaps alone; the rest go to a `Not Wireable` section with a reason. A not-wireable gap is never dropped — the field does hold another resource's identifier, and a resource carrying one is not clean.
+- **`Wireable` is read from the finding, and inferred only as a fallback.** The `Wireable:` bullet is authoritative. When it is absent — as in every finding written before the bullet existed — the merge infers non-wireability from the target text: `polymorphic` anywhere in it, a bare `unidentified`, or a "not ACK-managed" annotation. Inferred reasons are suffixed `(inferred)` and counted separately in the index so inference is never mistaken for a declaration. The bias is deliberately toward not-wireable, because overstating actionable work is the failure this split exists to prevent.
 - **Take the date from `date -u +%F`.** A report stamped from memory is hard to place against the `generator.yaml` state it describes.
