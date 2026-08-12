@@ -22,7 +22,7 @@ A CRD field that holds another AWS resource's identifier and has no `references`
 
 ## Prerequisite
 
-This skill depends on the **`ack-workspace` CLI** being on `PATH`. Its `candidates` command builds the deterministic candidate index every audit starts from, and there is no fallback path — see [Why ack-workspace](#why-ack-workspace) for what it does that a standalone script cannot.
+This skill depends on the **`ack-workspace` CLI** being on `PATH`. Its `candidates` command builds the deterministic candidate index every audit starts from, and there is no fallback path.
 
 ```bash
 ack-workspace candidates --help
@@ -86,15 +86,3 @@ The tell that is easiest to miss is shape reuse: the field's own description can
 - **A resource that could not be indexed is not a passing resource.** `NOT_ASSESSED` and `PASS` are distinct verdicts, and conflating them records a clean bill of health for a resource nobody examined.
 - **`generator.yaml` is authoritative for "already configured", not the CRD.** Sibling fields collapse onto one `*Ref` companion name — `groupID` and `groupName` both reduce to `groupRef` — so the CRD cannot tell you which sibling is wired.
 - **A suppressed field can hide a reference.** `ignore.field_paths` removes fields from the CRD entirely, so they reach no index by any method. `candidates` reports the identifier-looking ones; carry them into the report, because an empty gap list next to a non-empty suppression list is not a clean resource.
-
-## Why ack-workspace
-
-The index is only as good as its join between a CRD field and the API model member that documents it.
-
-`candidates` resolves that by **walking the model's shape graph** to each field path — starting from the resource's `Create` input plus every operation and shape a custom field draws from, naming members with the same transform the code-generator uses for the CRD's JSON tag, and applying `generator.yaml` renames scoped to their operation. A description or pattern matched this way is attributed to the member that actually declares it.
-
-The alternative, matching on member name, looks equivalent and is not. Across the models measured, 39.6% of member names carry more than one meaning (`Description` appears with 99 distinct meanings, `State` with 112), so a name-based join attaches plausible, well-written, wrong documentation — and it fails silently. It is worse for `pattern`, because an ARN template is the one signal an audit treats as near-conclusive; attaching the wrong one manufactures evidence.
-
-Fields the structural walk cannot reach fall back to a member-name index restricted to names that mean the same thing model-wide, and those records are labeled `model_join: member` so an auditor knows to verify before relying on them. Fleet-wide, 94.9% of model-contributed records resolve structurally.
-
-`candidates` also reads the CRDs and `generator.yaml` locally, fetches and decodes each model once per controller, resolves `sdk_names.model_name` itself, and needs no AWS credentials, git, or GitHub identity.

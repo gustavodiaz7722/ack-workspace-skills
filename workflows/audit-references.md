@@ -185,17 +185,6 @@ Four things to get right:
 
 Wrapping the role as a Kiro custom agent in `~/.kiro/agents/` would save repeating the SOP path, but it is an optimization, not a prerequisite: note that Kiro custom agents load no skills by default, so such a definition needs an explicit `skill://` resource or it runs without the ACK guidance its SOP depends on.
 
-## Serial Execution (no sub-agent support)
-
-If you are running somewhere without delegation, the fan-out becomes a serial loop, and two things change:
-
-1. **Re-read `roles/reference-auditor.md` before each resource** and treat each as a fresh audit. The role's scope boundary is doing real work — it stops resource N's findings from bleeding into resource N+1.
-2. **Cap the batch.** Serial auditing degrades as context fills. Audit at most 5–8 resources per session, write each finding to its `FINDING_OUT` path as you go, then start a new session. A session that tries to audit all 20 ec2 resources produces thorough findings for the first few and increasingly thin ones after, with nothing in the output revealing it.
-
-Write findings to disk here too, for the same reason a delegating run does: the merge reads files, so a serial run spread across five sessions merges exactly like a parallel one. Run `merge-reference-findings.sh` once at the end, not per session.
-
-The candidate indexes and findings are files on disk, so a batch interrupted at any point resumes cleanly — Phase 0 does not need repeating, and neither does any completed resource.
-
 ## Notes
 
 - **The orchestrator's context is the binding constraint on a fleet run, not the auditors'.** Auditors are independent and uniformly thorough however many there are; what fails is the session holding the loop. Both the write-to-file dispatch and the mechanical per-controller merge exist for that one reason. If a fleet run still runs short, stop at a controller boundary, merge, and resume — do not compensate by asking auditors for less depth.
