@@ -62,7 +62,7 @@ For each resource index, dispatch one **Reference Auditor** (`roles/reference-au
 > Reply with **only** the header block plus one `GAP: <path> | <target> | <signal> | <confidence>`
 > line per gap. Do not reply with the document, the rejected candidates, or the discrepancies.
 
-An auditor needs no model path: the index already carries the resolved description and pattern for every candidate, along with `model_join` saying how each was matched.
+An auditor needs no model path: the index already carries the resolved description and pattern for every candidate, along with `model_join` saying how each was matched. Its entire tool set is reading that index, `grep`/`jq` over it, and one write to `FINDING_OUT` — Phase 0 belongs to the orchestrator, not the auditor — so pre-approve exactly that where sub-agents need it, since one that stalls on an approval prompt costs a resource. A Claude Code subagent definition for the role ships at `agents/ack-reference-auditor.md`.
 
 **The finding goes to a file and only a summary comes back.** This is the single constraint that makes a fleet run survivable, and it is not an optimization. A finding is long by design — quoted evidence, proposed config, path rationale, caveats — and an orchestrator that lets 268 of them into its context runs out of room before Phase 2 and starts truncating its own audit without saying so. Phase 2 reads the files with `grep`/`awk` instead, so the orchestrator pays for the summary and nothing more.
 
@@ -83,9 +83,11 @@ awk '{print $1}' <(cd "$OUT_DIR" && find . -mindepth 2 -maxdepth 2 -name '*.json
 
 Batch fleet runs **by controller**, so a partial run still yields complete controllers rather than a scattering of half-audited ones, and so a controller's model-unavailable warning applies uniformly to the wave it affects.
 
+**Keep the fan-out one level deep**: orchestrator → N auditors, over a single flat loop of `(controller, resource)` pairs. Do not give a controller its own orchestrator that fans out per resource. Per-controller *reporting* is not per-controller *orchestration* — the merge groups by controller after the fact, from one flat dispatch loop.
+
 ### Collecting Results
 
-You do not need to track results yourself: **the presence of a finding file is the record.** Phase 2 derives every verdict and gap from the files, and a resource with a candidate index but no finding file is `NOT_ASSESSED` by construction. Read each auditor's summary to see how the wave went, then move on — do not transcribe the summaries into a running tally, and do not read the finding files to check them.
+You do not need to track results yourself: **the presence of a finding file is the record.** Phase 2 derives every verdict and gap from the files, and a resource with a candidate index but no finding file is `NOT_ASSESSED` by construction. Read each auditor's summary to see how the wave went, then move on — do not transcribe the summaries into a running tally, and do not read the finding files to check them. Reading the finding you just dispatched feels like verifying the work and is exactly what exhausts the orchestrator; if you want confirmation a wave landed, count files with `ls`/`wc -l` over `findings/` and leave the contents to Phase 2.
 
 Three outcomes, all of which survive into the report without any bookkeeping:
 
@@ -155,35 +157,6 @@ comm -13 <(cd "$OUT_DIR" && find findings -mindepth 2 -name '*.md' | sed 's|find
 ```
 
 Dispatch waves over that list, then re-run the merge — it is idempotent and rebuilds every report from whatever findings exist at the time. Prefer finishing a partially-audited controller before starting a new one, so a stopping point always leaves whole controllers behind.
-
-## Claude Code Execution
-
-Each dispatch maps to spawning the `ack-reference-auditor` subagent (`agents/ack-reference-auditor.md`) with the resource's index path and its `FINDING_OUT` path. The main session holds the wave loop only — the findings live on disk, not in the session.
-
-Keep the fan-out one level deep: orchestrator → N auditors. Do not build a per-controller orchestrator that itself fans out per resource; flatten to a single dispatch loop over `(controller, resource)` pairs. Note that per-controller *reporting* is not per-controller *orchestration* — the merge groups by controller after the fact, from one flat dispatch loop.
-
-## Kiro Execution
-
-Kiro runs sub-agents in parallel, each with its own isolated context, and the main agent waits for the batch to finish. No custom agent is required — dispatch with the Phase 1 prompt above and name the role SOP by path, one sub-agent per resource:
-
-```text
-Execute the Reference Auditor role at <repo>/roles/reference-auditor.md,
-following the schema at <repo>/roles/schemas/reference-audit-output.md.
-CONTROLLER_DIR=... RESOURCE=Nodegroup CANDIDATE_INDEX=/tmp/ref-audit/eks/Nodegroup.jsonl
-FINDING_OUT=/tmp/ref-audit/findings/eks/Nodegroup.md
-Write the finding to FINDING_OUT and reply with only the header block plus GAP lines.
-```
-
-Delegation is model-driven from the prompt rather than a CLI flag, so state the unit of work ("one sub-agent per resource, in parallel") explicitly.
-
-Four things to get right:
-
-- **Sub-agents inherit the parent's permissions** but isolate conversation history and context. Auditors read the index, grep/jq over it, and write one file — Phase 0 is the orchestrator's job, not theirs — so pre-approve reads, `grep`/`jq`, and a write to `FINDING_OUT`. A non-interactive sub-agent that hits an approval prompt fails fast rather than waiting.
-- **Supervised mode prompts before actions**, so a wide fan-out there is prompt-heavy. Autopilot is the practical mode for a fleet run, though nothing restricts sub-agents to it.
-- Kiro's docs do not specify a sub-agent concurrency cap, so treat the wave sizes above as prudence rather than a documented limit, and batch fleet runs per controller regardless.
-- **Do not call a file-reading tool on a finding.** This is the failure mode to watch for in Kiro specifically: reading the finding you just dispatched feels like verifying the work, and it is what exhausts the orchestrator. Verify a wave with `ls`/`wc -l` over `findings/` if you want confirmation the files landed, and leave the contents to Phase 2.
-
-Wrapping the role as a Kiro custom agent in `~/.kiro/agents/` would save repeating the SOP path, but it is an optimization, not a prerequisite: note that Kiro custom agents load no skills by default, so such a definition needs an explicit `skill://` resource or it runs without the ACK guidance its SOP depends on.
 
 ## Notes
 
