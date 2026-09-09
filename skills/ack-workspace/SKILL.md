@@ -73,6 +73,7 @@ Requires Go 1.26+ to build. Every command declares what it needs and it is all v
 | `release`| `git` | yes² | yes | code-generator in workspace + its build deps |
 | `build`  | `git`, `make`, `go` | no | no | code-generator in workspace |
 | `deploy` | `git`, `docker`, `aws`, `kubectl`, `helm`, `eksctl`³ | no | no | AWS creds (may create an EKS cluster); code-generator in workspace |
+| `test`   | `git`, `kubectl`, `python3`⁵ | no | no | AWS creds; the controller already deployed on the cluster |
 | `status` | `git` | no | no | — |
 | `attribution` | `git` | no | no | AWS creds (CodeBuild, S3) |
 | `candidates` | — | no | no | network access to the public API models⁴ |
@@ -88,6 +89,10 @@ better to know before a 20-minute image build than after.
 
 ⁴ `candidates` uses no AWS credentials and shells out to nothing. `GITHUB_TOKEN`, if present,
 only raises the rate limit on the API model fetches.
+
+⁵ `test` needs `git` because the suites pin `acktest` as a git URL that `pip` resolves by
+cloning, and `python3` to build the virtual environment the suite runs from. `pytest` is not
+checked: it lives inside that environment, not on your `PATH`.
 
 **AWS credentials, and anything else needing a network round-trip, are not pre-flighted.** An
 expired session surfaces when the command runs, not up front; keeping the check hermetic is
@@ -550,6 +555,75 @@ templates needs the code-generator run before `deploy` picks it up. Use `ack-wor
 `--workspace-root` (see the `build` command above). This replaces the manual env-override
 recipe that was previously required here.
 
+### `test` — run a controller's end-to-end suite
+
+Run a single controller's `test/e2e` suite against the controller **already running** on the
+development cluster: create the suite's AWS fixtures with `service_bootstrap.py`, run pytest
+over the suite, then delete those fixtures with `service_cleanup.py`.
+
+```bash
+ack-workspace test acm
+```
+
+`test` is the follow-on to `deploy`, never a replacement: it does not build an image, create a
+cluster, or install a controller. It confirms three things before running anything, and reports
+what it found:
+
+| Check | Not satisfied |
+|-------|---------------|
+| The kubeconfig selects `ack-dev-auto` | skipped, naming the `deploy` to run |
+| The cluster answers a read | failed |
+| The controller has a ready replica in `ack-system` | skipped, naming the `deploy` to run |
+
+The cluster is not selectable, for the same reason it is not on `deploy`: where a suite ran is
+the one thing its output cannot tell you afterwards, so a suite pointed at the wrong cluster
+fails in ways that read like product bugs. The readiness check exists because without the
+controller running, every test fails on a timeout and the report says nothing about why.
+
+The service may be a bare alias (`acm`) or full form (`acm-controller`). Useful flags:
+
+```bash
+ack-workspace test acm --dry-run                # print the commands; provision nothing
+ack-workspace test acm --methods test_invalid   # one test by name
+ack-workspace test acm --markers canary         # by pytest marker
+ack-workspace test acm --threads 4              # fewer xdist workers, when AWS throttles
+ack-workspace test acm --region eu-west-1       # pin where the suite creates resources
+ack-workspace test acm --skip-cleanup           # keep the fixtures to inspect a failure
+```
+
+Several `--markers` or `--methods` values become one pytest expression (`canary or slow`)
+rather than repeated flags, which pytest resolves by keeping only the last.
+
+**The Python environment lives outside the controller checkout**, at
+`$HOME/.ack-workspace/venvs/<service>-controller`: created on the first run, reused after, and
+reinstalled automatically when the suite repins its requirements (tracked by a digest of
+`requirements.txt`). The documented ACK setup puts a `.venv` inside `test/e2e`, but a
+controller's `.gitignore` does not cover it, so an in-checkout environment leaves untracked
+files that `status` reports as dirty and `deploy` refuses outright. An existing
+`test/e2e/.venv` **is** used when already present, so a hand-built environment is not
+duplicated.
+
+**The outcome is pytest's alone**, so a failure always means a test failed. Fixtures are torn
+down even when tests fail, and after a failed bootstrap that may have created part of them; a
+teardown that itself fails is reported in the summary, naming the AWS resources that may
+remain, rather than folded into the outcome.
+
+A suite that a repository does not have (around a tenth of the controllers carry no `test/e2e`
+directory) is a skip, not a failure. A missing service identifier is a usage error (exit
+code `2`).
+
+> **Caution:** a suite creates real AWS resources in the account your credentials resolve to
+> and deletes them on teardown — run it against a development account. `--skip-cleanup` leaves
+> them behind, where they keep costing until deleted by hand.
+
+**Why not `run-e2e-tests.sh`?** test-infra's entrypoint sources `kind.sh`,
+`controller-setup.sh`, and `pytest-image-runner.sh` unconditionally, and each checks its own
+binaries when sourced — so it will not start without `kind`, `kustomize`, `docker`, `jq`,
+`uuidgen`, and `yq`, plus a `test_config.yaml` carrying an assumed-role ARN. All of that serves
+the path that creates a KIND cluster and installs a controller, which `deploy` already owns and
+`test` deliberately never takes. What remains is the three commands
+`scripts/pytest-local-runner.sh` runs; the pytest invocation is kept identical to upstream's.
+
 ### `status` — inspect workspace state
 
 Report the state of every managed repository (branch, dirty flag, ahead/behind vs. upstream)
@@ -710,6 +784,14 @@ git -C <workspace-root>/<svc>-controller status   # review + commit generated ar
 ack-workspace build <svc>             # regenerate code if generator.yaml/hooks changed
 ack-workspace deploy <svc> --dry-run  # preview, including any cluster creation
 ack-workspace deploy <svc>            # first run adds ~15-25 min for the cluster; later runs reuse it
+ack-workspace test <svc>              # run the e2e suite against what you just deployed
+```
+
+**Iterate on a single failing e2e test:**
+```bash
+ack-workspace test <svc> --methods <test_name> --dry-run   # confirm the plan and the cluster
+ack-workspace test <svc> --methods <test_name>             # one test, full bootstrap/teardown
+ack-workspace test <svc> --methods <test_name> --skip-cleanup --log-level debug
 ```
 
 **Cut a release:**
@@ -731,7 +813,7 @@ ack-workspace remove <svc>               # local + fork (prompts)
 
 ## Safety Checklist
 
-- Run `--dry-run` before any `remove`, `refresh`, `release`, or `deploy`.
+- Run `--dry-run` before any `remove`, `refresh`, `release`, `deploy`, or `test`.
 - Run `ack-workspace build <svc>` and commit the regenerated artifacts before opening a PR
   whenever a change touches `generator.yaml`, hook templates, or anything affecting generated
   code.
@@ -741,5 +823,8 @@ ack-workspace remove <svc>               # local + fork (prompts)
   VPC, and an IAM role with `AdministratorAccess`. The cluster is expected to stay up between
   deploys, so it keeps costing until deleted; dry-run first in an account you are unsure about.
   Note that deploy also **rewrites your current kubeconfig context**.
+- For `test`, remember the suite creates real AWS resources in the account your credentials
+  resolve to. Teardown deletes them, but `--skip-cleanup` deliberately does not — reach for it
+  only to inspect a failure, and delete what it leaves behind.
 - For `remove`, prefer `--keep-fork` unless you truly want the fork deleted permanently.
 - Never expect the token to be saved — always supply it via env/flag.
