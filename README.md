@@ -49,7 +49,7 @@ That is not a hypothetical if this repo lives under a **gvm-managed GOPATH**: th
 
 `--check` is worth wiring into a shell startup file or a `SessionStart` hook if you switch Go versions often. Installing over a real directory is refused rather than silently destroying it — pass `--force` once you've confirmed it is not a hand-maintained skill that exists nowhere else.
 
-The durable fix is to keep the checkout outside GOPATH entirely. These are module-based repos, so nothing requires the GOPATH location; `ack-workspace` only defaults its workspace root there and takes `--workspace-root` to point elsewhere.
+The durable fix is to keep the checkout outside GOPATH entirely. These are module-based repos, so nothing requires the GOPATH location; `ack-workspace` only *defaults* its workspace root there. Drop a `.ack-workspace/config` file in the new root — `cd <root> && ack-workspace config set --local` — and every command resolves to it from anywhere inside the tree, with no `--workspace-root` and no environment variables. Two workspaces can coexist that way, each with its own config file, which is also how you migrate off a gvm pkgset path without cutting over in one step.
 
 The roles, workflows, and agents directories sit at the repo root and are referenced by relative path from the skill, so keep the tree intact rather than copying `skills/` alone.
 

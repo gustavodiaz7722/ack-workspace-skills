@@ -105,26 +105,75 @@ Settings resolve with this precedence, highest first:
 
 1. command-line flag
 2. environment variable (where defined)
-3. persisted config file (`$HOME/.ack-workspace/config`)
-4. built-in default
+3. workspace-local config file (`<workspace-root>/.ack-workspace/config`)
+4. global config file (`$HOME/.ack-workspace/config`)
+5. built-in default
 
 | Setting          | Flag                | Env            | Default                                      |
 |------------------|---------------------|----------------|----------------------------------------------|
 | GitHub identity  | `--github-user`     | `GITHUB_USER`  | _(none; required only by the commands that name a fork — see Prerequisites)_ |
 | GitHub token     | `--token`           | `GITHUB_TOKEN` | _(none; required by the commands that call the GitHub API; never persisted)_ |
-| Workspace root   | `--workspace-root`  | —              | `$GOPATH/src/github.com/aws-controllers-k8s` |
+| Workspace root   | `--workspace-root`  | —              | the enclosing workspace-local config's directory, else `$GOPATH/src/github.com/aws-controllers-k8s` |
 | Fork name prefix | `--prefix`          | —              | `ack-`                                       |
 | Concurrency      | `--concurrency`     | —              | `4` (valid range `1`–`32`)                   |
 | Preview mode     | `--dry-run`         | —              | `false`                                      |
+
+Only the GitHub identity and token have environment variables. The workspace root, prefix,
+and concurrency come from a flag or a config file — so a per-directory `.envrc` cannot set
+them, and a wrapper that injects `--workspace-root` is not needed either now that
+workspace-local config files exist.
 
 Persist settings once so you don't repeat them:
 
 ```bash
 export GITHUB_TOKEN=ghp_xxx
 ack-workspace config set --github-user octocat
-ack-workspace config get      # print resolved values
-ack-workspace config path     # print the config file path
+ack-workspace config get      # print resolved values and the file they came from
+ack-workspace config path     # print the config file in effect here
 ```
+
+### Several workspaces on one machine
+
+The two layers are what let more than one workspace coexist. The global file holds what every
+workspace shares — usually just your identity — and a workspace-local file overrides it for
+work anywhere inside that tree. Commands run from any directory under a workspace pick up its
+configuration automatically, with no `--workspace-root` on the command line.
+
+Create one from the workspace root:
+
+```bash
+cd ~/ack-workspace
+ack-workspace config set --local                      # inherit everything, just pin the root
+ack-workspace config set --local --concurrency 8      # ...or override a value for this workspace
+```
+
+That writes `~/ack-workspace/.ack-workspace/config`. From then on, anywhere inside that tree:
+
+```bash
+cd ~/ack-workspace/s3-controller
+ack-workspace config get
+# workspace-root: /home/you/ack-workspace
+# config-file:    /home/you/ack-workspace/.ack-workspace/config (workspace-local)
+```
+
+Rules worth knowing, because each one is load-bearing:
+
+- **The file's location defines the workspace root.** A local file needs no `workspace_root`
+  key, and `config set --local` deliberately omits it, so the workspace keeps working if the
+  directory is moved or renamed. Set `workspace_root` explicitly only when a config has to
+  describe a tree it does not live in.
+- **The layers merge per value, not wholesale.** A local file setting only `concurrency` still
+  inherits `github_user` and `repo_prefix` from the global file. A local file containing
+  nothing but comments is valid and useful: its mere presence pins the root.
+- **The local file's location outranks the global file's `workspace_root`.** Standing inside a
+  workspace is the stronger signal, which is what makes a second workspace reachable without
+  flags.
+- **The nearest file wins** when directories nest, and `$HOME/.ack-workspace/config` is always
+  the global layer — never treated as workspace-local, so running from `$HOME` does not make
+  `$HOME` the workspace root. That check resolves symlinks, which matters when `$HOME`
+  (`/home/you`) and its real path (`/local/home/you`) differ, as on cloud desktops.
+- **`config get` names the file** the persisted values came from and tags it `global` or
+  `workspace-local`. Reach for it whenever a command targets an unexpected tree.
 
 ---
 
@@ -721,13 +770,19 @@ identifier list is a usage error (exit code `2`).
 ### `config` — view and persist settings
 
 ```bash
-ack-workspace config set --github-user octocat   # persist a setting
-ack-workspace config get                          # print resolved values
-ack-workspace config path                         # print config file path
+ack-workspace config set --github-user octocat   # persist to the file in effect
+ack-workspace config set --local                  # persist to ./.ack-workspace/config
+ack-workspace config get                          # print resolved values + their source file
+ack-workspace config path                         # print the config file in effect
 ```
 
-The config file lives at `$HOME/.ack-workspace/config`. The GitHub token is never written
-there regardless of how it was supplied.
+Settings live in two layers: a global file at `$HOME/.ack-workspace/config` and an optional
+workspace-local file at `<workspace-root>/.ack-workspace/config`, found by walking up from the
+working directory. `set` writes to whichever is in effect; `--local` writes to the working
+directory's own file, which is how a workspace-local config gets created. See
+[Configuration](#configuration) for the precedence rules and the multi-workspace setup.
+
+The GitHub token is never written to either file, regardless of how it was supplied.
 
 ---
 
@@ -738,7 +793,8 @@ Available on all commands (subject to per-command relevance):
 - `--dry-run` — preview without making changes (always exits `0`)
 - `--github-user <name>` / `GITHUB_USER` — your GitHub identity
 - `--token <token>` / `GITHUB_TOKEN` — GitHub token (never persisted)
-- `--workspace-root <path>` — override the workspace root
+- `--workspace-root <path>` — override the workspace root (rarely needed inside a workspace
+  that has a local config file, which supplies its own root)
 - `--prefix <prefix>` — fork name prefix (default `ack-`)
 - `--concurrency <n>` — parallel worker count, `1`–`32` (default `4`); out of range is a
   usage error (exit `2`)
@@ -764,6 +820,19 @@ ack-workspace config set --github-user <you>
 ack-workspace init
 ack-workspace add s3 sns          # or: add all --dry-run, then add all
 ```
+
+**Add a second workspace alongside an existing one:**
+```bash
+ack-workspace init --workspace-root ~/other-workspace     # --workspace-root only while bootstrapping
+ack-workspace add all --workspace-root ~/other-workspace
+cd ~/other-workspace && ack-workspace config set --local  # pin the root; no more flags needed
+cd ~/other-workspace/s3-controller && ack-workspace config get   # confirm which root resolves
+```
+Do the same in the original workspace so both are explicit, and leave the global file's
+`workspace_root` as the fallback for commands run outside either tree. Existing forks are
+detected and cloned rather than re-forked, so a second workspace does not duplicate anything on
+GitHub — it is a second working tree over the same forks. Feature branches must be pushed to
+show up in a fresh clone; uncommitted or unpushed work stays where it is.
 
 **Start clean before new work:**
 ```bash
