@@ -290,6 +290,14 @@ Steps performed on the controller:
 5. push the branch to your fork (`origin`), and
 6. open a PR against `aws-controllers-k8s/<svc>-controller`.
 
+Like `build`, step 3 **wires up the environment overrides** the release script otherwise
+resolves relative to a workspace root literally named `aws-controllers-k8s`
+(`ACK_GENERATE_BIN_PATH`, `TEMPLATES_DIR`), so a release cuts correctly from any
+`--workspace-root`. Without them the script aborts immediately with `Unable to find an
+ack-generate binary` even when the binary is present at
+`<root>/code-generator/bin/ack-generate`. `--dry-run` prints the resolved overrides, which is
+the quickest way to confirm they point into your workspace.
+
 The service may be a bare alias (`ecr`) or full form (`ecr-controller`). The version is
 normalized to carry a leading `v` (`1.0.1` and `v1.0.1` are equivalent). Useful flags:
 
@@ -303,6 +311,17 @@ ack-workspace release ecr --version v1.0.1 --pr-body "$(cat notes.md)"  # custom
 Safety: a controller with uncommitted changes is skipped; a base branch diverged from
 upstream is reported as a failure (never force-updated); an existing `release-<version>`
 branch is left untouched; a release that generates no changes is a no-op (no empty commit).
+
+**Retrying a failed release means deleting its branch first.** The branch is created in step 2,
+before the generation in step 3, so a failure from step 3 onwards leaves it behind — and the
+next run then *skips* on `release branch "release-<version>" already exists` rather than
+retrying. Confirm it carries no commits (`git log --oneline <base>..release-<version>`) and
+delete it before re-running:
+
+```bash
+git -C <workspace-root>/<svc>-controller checkout <base>
+git -C <workspace-root>/<svc>-controller branch -d release-<version>
+```
 
 Missing service identifier or invalid version is a usage error (exit code `2`).
 
