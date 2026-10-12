@@ -654,6 +654,9 @@ A non-zero count is a `FAIL` even with all four conditions green, and the count 
 ## Related
 
 - [PR Template](pr-template.md) — the PR body for a reference-adding change
-- [generator.yaml Reference](../../../references/generator-yaml-reference.md) — full field-level option list
-- [Code Generation Deep Dive](code-generation.md) — wrapper fields, custom fields that can carry references
-- [Testing](testing.md) — E2E test structure for the resource's own CRUD coverage (reference resolution is not covered there)
+
+The rest live in the **ack-dev** skill, so they are named rather than linked; a relative link would have to climb out of this skill to reach them:
+
+- *generator.yaml Reference*, listed under ack-dev's Reference Files — full field-level option list
+- ack-dev `references/code-generation.md` — wrapper fields, custom fields that can carry references
+- ack-dev `references/testing.md` — E2E test structure for the resource's own CRUD coverage (reference resolution is not covered there)

@@ -51,33 +51,33 @@ That is not a hypothetical if this repo lives under a **gvm-managed GOPATH**: th
 
 The durable fix is to keep the checkout outside GOPATH entirely. These are module-based repos, so nothing requires the GOPATH location; `ack-workspace` only *defaults* its workspace root there. Drop a `.ack-workspace/config` file in the new root — `cd <root> && ack-workspace config set --local` — and every command resolves to it from anywhere inside the tree, with no `--workspace-root` and no environment variables. Two workspaces can coexist that way, each with its own config file, which is also how you migrate off a gvm pkgset path without cutting over in one step.
 
-The roles, workflows, and agents directories sit at the repo root and are referenced by relative path from the skill, so keep the tree intact rather than copying `skills/` alone.
+Every skill here keeps everything it links to inside its own directory, so it resolves however it is installed.
 
 ## Layout
 
 ```
 scripts/
 ├── install-skills.sh           # symlink skills into a Kiro skills dir; --check verifies
-└── merge-reference-findings.sh # assemble audit reports from findings, one per controller
+└── skill-sources               # directories holding the skills to install
 
 skills/ack-workspace/           # CLI reference
 └── SKILL.md
 
-skills/ack-reference-audit/     # Agent Skill directory
+skills/ack-reference-audit/     # Agent Skill directory; everything it links to lives inside it
 ├── SKILL.md                    # Entry point: prerequisite, the two tasks, what makes an audit wrong
-└── references/
-    └── cross-resource-references.md   # Identifying gaps, and remediating them
-
-workflows/
-└── audit-references.md         # Build indexes → fan out one auditor per resource → merge per controller
-
-roles/                          # Tool-agnostic role SOPs
-├── reference-auditor.md        # Per-resource audit methodology and obligations
-└── schemas/
-    └── reference-audit-output.md      # Finding, per-controller report, and fleet index shapes
-
-agents/
-└── ack-reference-auditor.md    # Claude Code subagent definition
+├── references/
+│   ├── cross-resource-references.md   # Identifying gaps, and remediating them
+│   └── pr-template.md                 # PR body for a reference-adding change
+├── workflows/
+│   └── audit-references.md     # Build indexes → fan out one auditor per resource → merge per controller
+├── roles/                      # Tool-agnostic role SOPs
+│   ├── reference-auditor.md    # Per-resource audit methodology and obligations
+│   └── schemas/
+│       └── reference-audit-output.md  # Finding, per-controller report, and fleet index shapes
+├── scripts/
+│   └── merge-reference-findings.sh    # Assemble audit reports from findings, one per controller
+└── agents/
+    └── ack-reference-auditor.md       # Claude Code subagent definition
 ```
 
 ## Separation of concerns

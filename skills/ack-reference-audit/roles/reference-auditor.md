@@ -31,10 +31,10 @@ Two consequences for how you write the file:
 
 If `FINDING_OUT` was not given, return the finding in your reply as normal.
 
-Both documents you need sit beside this one in the same repository, resolved relative to *this file*, not to `CONTROLLER_DIR`:
+Both documents you need sit beside this one in the same skill, resolved relative to *this file*, not to `CONTROLLER_DIR`:
 
 - output schema — [`schemas/reference-audit-output.md`](schemas/reference-audit-output.md)
-- identification method, signal hierarchy, and remediation config — [`../skills/ack-reference-audit/references/cross-resource-references.md`](../skills/ack-reference-audit/references/cross-resource-references.md)
+- identification method, signal hierarchy, and remediation config — [`../references/cross-resource-references.md`](../references/cross-resource-references.md)
 
 Read the second one; this SOP does not restate it.
 
@@ -96,7 +96,7 @@ For each gap, identify the referenced Kind and owning service. A gap you cannot 
 
 Verify the target is an ACK-managed resource: check that a `<service>-controller` exists and declares that Kind in its `generator.yaml`. A reference to a Kind no controller manages cannot be configured.
 
-**Then check whether the field accepts more than one resource type.** A polymorphic field cannot be wired at all — the generator takes one `resource` per field — so it is `Wireable: no (polymorphic)` with no proposed config. Two checks the index cannot do for you: read whether the member's own description is unqualified or enumerates alternatives, and walk the member to its target *shape* to see whether other members pointing at the same shape are documented for a different resource type. The second one catches fields whose own sentence reads unambiguously. A sibling field covering the other type means two monomorphic fields, not one polymorphic one. The reference doc's [Polymorphic Targets Are Not Wireable](../skills/ack-reference-audit/references/cross-resource-references.md#polymorphic-targets-are-not-wireable) has the full list of tells.
+**Then check whether the field accepts more than one resource type.** A polymorphic field cannot be wired at all — the generator takes one `resource` per field — so it is `Wireable: no (polymorphic)` with no proposed config. Two checks the index cannot do for you: read whether the member's own description is unqualified or enumerates alternatives, and walk the member to its target *shape* to see whether other members pointing at the same shape are documented for a different resource type. The second one catches fields whose own sentence reads unambiguously. A sibling field covering the other type means two monomorphic fields, not one polymorphic one. The reference doc's [Polymorphic Targets Are Not Wireable](../references/cross-resource-references.md#polymorphic-targets-are-not-wireable) has the full list of tells.
 
 ### 4. Choose the `path`, and justify it
 

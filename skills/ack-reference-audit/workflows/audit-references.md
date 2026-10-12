@@ -12,6 +12,7 @@ Invoked when asked to audit references / find missing `references` blocks / chec
 - **CONTROLLER**: controller alias, or `all`
 - **RESOURCE**: resource Kind, or `all` (default `all`)
 - **OUT_DIR**: where candidate indexes and the report are written (default `/tmp/ref-audit`)
+- **SKILL_DIR**: the directory the ack-reference-audit skill was loaded from. Every relative path in this workflow is relative to it, not to your working directory, and auditors get them as absolute `$SKILL_DIR/...` paths because they start somewhere else.
 
 Prerequisite: the `ack-workspace` binary on `PATH`. Phase 0 depends on it and there is no fallback — build it with `go build .` in the `ack-workspace` checkout if it is missing.
 
@@ -53,12 +54,12 @@ For the full fleet expect 268 indexes across 70 controllers, in about 20 seconds
 
 For each resource index, dispatch one **Reference Auditor** (`roles/reference-auditor.md`):
 
-> Execute the Reference Auditor role at roles/reference-auditor.md.
+> Execute the Reference Auditor role at {SKILL_DIR}/roles/reference-auditor.md.
 > CONTROLLER_DIR={CONTROLLER_DIR} RESOURCE={Kind}
 > PHASE0_LOG={OUT_DIR}/phase0.log
 > CANDIDATE_INDEX={OUT_DIR}/{alias}/{Kind}.jsonl
 > FINDING_OUT={OUT_DIR}/findings/{alias}/{Kind}.md
-> Write your complete finding to FINDING_OUT following roles/schemas/reference-audit-output.md.
+> Write your complete finding to FINDING_OUT following {SKILL_DIR}/roles/schemas/reference-audit-output.md.
 > Reply with **only** the header block plus one `GAP: <path> | <target> | <signal> | <confidence>`
 > line per gap. Do not reply with the document, the rejected candidates, or the discrepancies.
 
@@ -111,7 +112,7 @@ comm -13 <(sort "$OUT_DIR/.merge/done.txt") <(cd "$OUT_DIR" && find . -mindepth 
 One command, and it is the only supported way to merge:
 
 ```bash
-<skills-repo>/scripts/merge-reference-findings.sh "$OUT_DIR"
+"$SKILL_DIR/scripts/merge-reference-findings.sh" "$OUT_DIR"
 ```
 
 It writes **one report per controller** plus a **thin fleet index**:
@@ -141,7 +142,7 @@ Give the user:
 2. **The highest-confidence clusters** — a handful of controllers or resources, not the whole table
 3. **What was not assessed, and why** — state this plainly rather than burying it. If the run was partial, say so in the first line.
 4. **Paths** — the fleet index, and the per-controller reports directory
-5. **Suggested next step** — which gap batch to implement first, and that implementing it means editing `generator.yaml`, regenerating, and verifying per `skills/ack-reference-audit/references/cross-resource-references.md`
+5. **Suggested next step** — which gap batch to implement first, and that implementing it means editing `generator.yaml`, regenerating, and verifying per `references/cross-resource-references.md`
 
 Do not offer to implement gaps as part of this workflow. Auditing and implementing are separate; a reviewer should see the audit before code changes land.
 
