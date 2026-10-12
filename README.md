@@ -51,7 +51,11 @@ That is not a hypothetical if this repo lives under a **gvm-managed GOPATH**: th
 
 The durable fix is to keep the checkout outside GOPATH entirely. These are module-based repos, so nothing requires the GOPATH location; `ack-workspace` only *defaults* its workspace root there. Drop a `.ack-workspace/config` file in the new root — `cd <root> && ack-workspace config set --local` — and every command resolves to it from anywhere inside the tree, with no `--workspace-root` and no environment variables. Two workspaces can coexist that way, each with its own config file, which is also how you migrate off a gvm pkgset path without cutting over in one step.
 
-Every skill here keeps everything it links to inside its own directory, so it resolves however it is installed.
+### Links must not climb out of a skill
+
+A harness reads an installed skill through its link and resolves `..` lexically from there. Kiro reports the skill directory as `~/.kiro/skills/<name>`, so a link to `../../workflows/x.md` reads as `~/.kiro/workflows/x.md`, not the file in this repository. It fails as quietly as a broken skill link: the agent just reports the file missing. So every skill here keeps everything it links to inside its own directory, and names another skill's files rather than linking them.
+
+`ack-dev` does link out, to `../../references/` in its own repository, and the fork has to stay byte-identical to upstream. The script handles that by linking the directory beside the skills directory, so `~/.kiro/references` points at `ack-dev-skills/references`. That only works where the harness doesn't own the name. `~/.kiro/agents` is Kiro's own agent configuration, so a skill that climbed to `../../agents` could never be served. `--check` follows every relative link the way an agent does, and reports a link that does not resolve, a shared directory that is missing or stale, and one that is blocked.
 
 ## Layout
 

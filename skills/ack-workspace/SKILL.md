@@ -190,8 +190,10 @@ ack-workspace init --dry-run
 ```
 
 `ack-dev-skills` packages the ACK development guidance as an Agent Skill and lands as a peer
-next to the other core repos. For Kiro, install it:
-`ln -s <workspace-root>/ack-dev-skills/skills/ack-dev ~/.kiro/skills/ack-dev`.
+next to the other core repos. For Kiro, install it with `scripts/install-skills.sh` from an
+`ack-workspace-skills` checkout, not a bare `ln -s` of the skill directory: ack-dev links to
+`../../references/`, which only resolves once the script has linked that directory beside the
+skills directory.
 
 Run `init` before `add`, `release`, or `deploy` — those depend on the core repos (especially
 `code-generator`) being present.

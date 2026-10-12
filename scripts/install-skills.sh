@@ -18,6 +18,11 @@
 # every link at once. A broken skill symlink raises no error — the skill just
 # stops appearing — so --check is how you find out, and a plain re-run repairs it.
 #
+# Both modes also follow every relative link inside each skill the way an agent
+# reads it, through the installed path. A link that climbs to the directory
+# holding the skills directory (ack-dev's ../../references) is served by linking
+# that directory beside DIR, so a skill whose links climb is installed whole.
+#
 # Usage:
 #   ./scripts/install-skills.sh                 # install into ~/.kiro/skills
 #   ./scripts/install-skills.sh --check         # verify, exit 1 if anything is wrong
@@ -38,7 +43,7 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1; shift ;;
     --dir) TARGET_DIR="$2"; shift 2 ;;
     --sources) SOURCES_FILE="$2"; shift 2 ;;
-    -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -50,7 +55,46 @@ fi
 
 failures=0
 warnings=0
+dead=0
 declare -A seen_from=()
+
+# Skills that installed (or checked) cleanly, in parallel arrays, for the link
+# pass that runs once every skill is in place.
+declare -a ok_names=() ok_srcs=() ok_roots=()
+
+# Directories beside the skills directory that some skill's links climb to:
+# name -> the directory it must link to, and the skill that first needed it.
+declare -A shared_want=() shared_for=()
+
+# lexical_path collapses . and .. in an absolute path without consulting the
+# filesystem. That is how an agent resolves a relative link — and the opposite
+# of what the kernel does when it walks through a symlinked directory.
+lexical_path() {
+  local IFS=/ part
+  local -a parts out=()
+  read -ra parts <<< "$1"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|.) ;;
+      ..) if [ ${#out[@]} -gt 0 ]; then unset "out[$(( ${#out[@]} - 1 ))]"; fi ;;
+      *) out+=("$part") ;;
+    esac
+  done
+  if [ ${#out[@]} -eq 0 ]; then printf '/'; else printf '/%s' "${out[@]}"; fi
+}
+
+# physical_path prints where an existing path really lands, every symlink followed.
+physical_path() {
+  if [ -d "$1" ]; then
+    (cd "$1" && pwd -P)
+  else
+    printf '%s/%s' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"
+  fi
+}
+
+case "$TARGET_DIR" in /*) ;; *) TARGET_DIR="$PWD/$TARGET_DIR" ;; esac
+TARGET_DIR=$(lexical_path "$TARGET_DIR")
+SHARED_DIR=$(dirname "$TARGET_DIR")
 
 # resolve_root turns a line from the source list into an absolute path. A
 # relative path is resolved against the repository root rather than the caller's
@@ -113,6 +157,122 @@ check_one() {
   fi
 }
 
+# --- Links inside a skill -----------------------------------------------------
+#
+# A harness reads an installed skill through its link and resolves `..`
+# lexically from there. Kiro reports the skill directory as
+# ~/.kiro/skills/<name>, and its read_file collapses ../ without following the
+# link first, so ack-dev's ../../references/x.md resolves to
+# ~/.kiro/references/x.md, not to the repository the link was written in. The
+# kernel would follow the link and find the file; the agent never gets that far,
+# and a dead link raises no error any more than a dead skill does.
+#
+# So a link may stay inside its skill, point at a sibling skill (resolved through
+# that skill's own link), or climb to the directory that holds the skills
+# directory. The last kind is served by linking that top-level directory beside
+# the skills directory — ~/.kiro/references for ack-dev — which cannot be done
+# where the harness owns the name: ~/.kiro/agents is Kiro's own. Skills in this
+# repository therefore keep every link inside the skill.
+
+# skill_links prints "<file>\t<target>" for every relative markdown link in a
+# skill, fragment removed. Fenced code blocks are skipped: a link there is an
+# example of output, not a link.
+skill_links() {
+  local file
+  while IFS= read -r -d '' file; do
+    awk -v f="$file" '
+      /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+      fence { next }
+      {
+        line = $0
+        while (match(line, /\]\([^)[:space:]]+\)/)) {
+          t = substr(line, RSTART + 2, RLENGTH - 3)
+          line = substr(line, RSTART + RLENGTH)
+          sub(/#.*/, "", t)
+          if (t == "" || t ~ /^[A-Za-z][A-Za-z0-9+.-]*:/ || t ~ /^\//) continue
+          print f "\t" t
+        }
+      }' "$file"
+  done < <(find "$1" -name '*.md' -print0)
+}
+
+# check_links verifies every link in one installed skill resolves the way an
+# agent reads it, and records the shared directories its links climb to.
+check_links() {
+  local src="$1" name="$2" root="$3" above file target rel intended seen top
+  above=$(dirname "$root")
+  while IFS=$'\t' read -r file target; do
+    rel=${file#"$src"/}
+    intended=$(lexical_path "$src/$(dirname "$rel")/$target")
+    seen=$(lexical_path "$TARGET_DIR/$name/$(dirname "$rel")/$target")
+
+    if [ ! -e "$intended" ]; then
+      printf '  %-24s DEAD    %s: %s is broken in the source too\n' "$name" "$rel" "$target"
+      dead=$((dead + 1))
+      continue
+    fi
+
+    case "$intended" in
+      "$root"/*) ;;
+      "$above"/*)
+        top=${intended#"$above"/}
+        top=${top%%/*}
+        if [ -n "${shared_want[$top]:-}" ] && [ "${shared_want[$top]}" != "$above/$top" ]; then
+          printf '  %-24s CONFLICT ../%s is also wanted by %s, from %s\n' \
+            "$name" "$top" "${shared_for[$top]}" "${shared_want[$top]}"
+          failures=$((failures + 1))
+        else
+          shared_want[$top]="$above/$top"
+          case ", ${shared_for[$top]:-}, " in
+            *", $name, "*) ;;
+            *) shared_for[$top]="${shared_for[$top]:+${shared_for[$top]}, }$name" ;;
+          esac
+        fi
+        continue
+        ;;
+    esac
+
+    if [ -e "$seen" ] && [ "$(physical_path "$seen")" = "$(physical_path "$intended")" ]; then
+      continue
+    fi
+    case "$intended" in
+      "$root"/*)
+        top=${intended#"$root"/}
+        printf '  %-24s LINK    %s: %s needs skill %s installed beside it\n' \
+          "$name" "$rel" "$target" "${top%%/*}" ;;
+      *)
+        printf '  %-24s LINK    %s: %s climbs above %s; no install can reach it\n' \
+          "$name" "$rel" "$target" "$above" ;;
+    esac
+    failures=$((failures + 1))
+  done < <(skill_links "$src")
+}
+
+# shared_one installs or checks one directory that skills' links climb to.
+shared_one() {
+  local top="$1" want="${shared_want[$1]}" link="$SHARED_DIR/$1" label="../$1"
+
+  # A real directory here belongs to someone else — ~/.kiro/agents is Kiro's own
+  # agent configuration — so not even --force replaces it. The skill has to stop
+  # climbing instead.
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    printf '  %-24s BLOCKED %s is a real path; links from %s into it cannot resolve\n' \
+      "$label" "$link" "${shared_for[$top]}"
+    failures=$((failures + 1))
+  elif [ "$MODE" != check ]; then
+    ln -sfn "$want" "$link"
+    printf '  %-24s linked  -> %s\n' "$label" "$want"
+  elif [ -L "$link" ] && [ -e "$link" ] && [ "$(physical_path "$link")" = "$(physical_path "$want")" ]; then
+    printf '  %-24s ok\n' "$label"
+  elif [ -L "$link" ]; then
+    printf '  %-24s STALE   -> %s (wanted by %s)\n' "$label" "$(readlink "$link")" "${shared_for[$top]}"
+    failures=$((failures + 1))
+  else
+    printf '  %-24s MISSING wanted by %s\n' "$label" "${shared_for[$top]}"
+    failures=$((failures + 1))
+  fi
+}
+
 while IFS= read -r line || [ -n "$line" ]; do
   line="${line%%#*}"
   line="$(printf '%s' "$line" | tr -d '[:space:]')"
@@ -145,14 +305,28 @@ while IFS= read -r line || [ -n "$line" ]; do
     fi
     seen_from[$name]="$root"
 
+    before=$failures
     if [ "$MODE" = check ]; then
       check_one "$src" "$name"
     else
       install_one "$src" "$name"
     fi
+    if [ "$failures" -eq "$before" ]; then
+      ok_names+=("$name"); ok_srcs+=("$src"); ok_roots+=("$root")
+    fi
   done
   [ "$found" -eq 1 ] || printf '  %-24s NO SKILLS %s\n' "($line)" "$root"
 done < "$SOURCES_FILE"
+
+# Links are checked only once every skill is in place, because a link may point
+# at a sibling skill installed later in the loop. A skill that is itself missing
+# or broken was already reported; its links would only repeat that.
+for i in ${ok_names[@]+"${!ok_names[@]}"}; do
+  check_links "${ok_srcs[$i]}" "${ok_names[$i]}" "${ok_roots[$i]}"
+done
+for top in ${shared_want[@]+"${!shared_want[@]}"}; do
+  shared_one "$top"
+done
 
 echo
 if [ "$failures" -gt 0 ]; then
@@ -171,4 +345,9 @@ else
 fi
 if [ "$warnings" -gt 0 ]; then
   echo "$warnings listed source(s) absent — their skills are not installed"
+fi
+# Not a failure: no installation can repair a link that is dead in its own
+# repository, and a sibling fork would keep this red until upstream fixes it.
+if [ "$dead" -gt 0 ]; then
+  echo "$dead link(s) broken in their source repository — fix them there"
 fi
