@@ -577,6 +577,26 @@ Do **not** `kubectl delete crd` to clear the conflict — deleting a CRD deletes
 resource of that kind on the cluster. To let helm own the CRDs instead, re-apply them
 server-side first: `kubectl apply --server-side --force-conflicts -f <crds>`.
 
+**`deploy` stops with `exec credential API client.authentication.k8s.io/v1alpha1`.** The
+`aws` that resolves first on `PATH` is too old: AWS CLI v1 releases such as 1.18 write the
+`v1alpha1` exec API into the kubeconfig, and their `aws eks get-token` emits it too, while
+kubectl 1.24 and later only accept `v1beta1` or `v1`. Older ack-workspace builds missed this
+and failed one step later with `exec plugin: invalid apiVersion
+"client.authentication.k8s.io/v1alpha1"` from `kubectl create namespace`, or helm's `no kind
+"ExecCredential" is registered for version ... v1alpha1`. Editing the kubeconfig does not
+help, because `deploy` rewrites the entry every run. Put AWS CLI v2 first and re-run:
+
+```bash
+which -a aws                                   # e.g. /usr/bin/aws (v1) ahead of /usr/local/bin/aws (v2)
+export PATH="/usr/local/bin:$PATH" && aws --version   # expect aws-cli/2.x
+ack-workspace deploy <svc>
+```
+
+Agent shells are the usual cause: they rebuild `PATH` without your profile, so a system v1 in
+`/usr/bin` can win even when your interactive shell finds v2. Note that `deploy` also selects
+`ack-dev-auto` as the current context; switch back with `kubectl config use-context <previous>`
+when you are done.
+
 **The controller exits at startup with `unable to determine account info`.** It has no AWS
 credentials, which under Pod Identity means the pod was admitted without the association's
 env vars being injected — either no association covers its `(namespace, serviceAccount)` pair,
