@@ -401,6 +401,7 @@ is traceable to the exact local commit. Useful flags:
 ack-workspace deploy ecr --dry-run                       # preview; changes nothing
 ack-workspace deploy ecr --region us-west-2              # target a specific region
 ack-workspace deploy ecr --resync-period 60             # resync every 60s instead of the chart's 10h
+ack-workspace deploy ecr --log-level debug               # log every reconcile step and requeue
 ```
 
 #### Fixed destination
@@ -431,8 +432,8 @@ A deploy is **identified by its commit**, and two rules with no opt-out make tha
 So the tag is a complete description of the image's source. A tag already in ECR therefore
 *proves* an image built from exactly this source exists, and `deploy` **skips the build and push**
 and installs it. Redeploying a commit — retrying after a failed `helm` step, or changing a chart
-value like the resync period — costs a rollout instead of a full image build, with no flag to
-remember.
+value like the resync period or log level — costs a rollout instead of a full image build, with
+no flag to remember.
 
 ```
 ecr-controller  failed  ecr-controller has uncommitted changes; commit them so the deployed
@@ -475,6 +476,23 @@ would disable periodic resync entirely.
 Keep it out of anything long-lived. A 60-second resync means every managed resource is
 re-reconciled every minute, which multiplies AWS API calls and invites throttling once more
 than a handful of resources exist.
+
+**`--log-level` sets the controller's log level** (`log.level` on the chart). The chart default
+is `info`, and the lines that show a reconcile step by step are logged only at `debug`: the
+`>>`/`<<` entry and exit lines for `rm.ReadOne`, `rm.sdkFind` and the other resource-manager
+calls, each exit carrying the error returned, and every requeue — `requeue needed after error`
+with its `after` delay and reason, or a bare `requeueing` when the requeue carries no error. Use `debug` whenever the question is *what the
+controller did*, such as how often it requeued and why.
+
+It is on the deploy for the same reason as the resync period: deploy installs the chart with its
+default values, so a level raised with a separate `helm upgrade --set log.level=debug` is reset
+by the next deploy and costs an extra rollout each time. The value must be one of `debug`,
+`info`, `warn` or `error`, matched case-insensitively; anything else is a usage error (exit
+`2`). That check exists because the runtime ignores an unparseable level and falls back to
+`info`, so a typo would otherwise deploy cleanly and just never show the debug lines. Both
+overrides appear in the dry-run preview and in the deploy outcome (`... (namespace ack-system)
+with log level debug; ...`). Their absence from the outcome means the chart defaults are in
+effect.
 
 > **Caution:** `deploy` may **create** an ECR repository in your AWS account when one is
 > absent, and an EKS cluster when `ack-dev-auto` does not exist. Dry-run first in an account
@@ -593,9 +611,13 @@ ack-workspace deploy <svc>
 ```
 
 Agent shells are the usual cause: they rebuild `PATH` without your profile, so a system v1 in
-`/usr/bin` can win even when your interactive shell finds v2. Note that `deploy` also selects
-`ack-dev-auto` as the current context; switch back with `kubectl config use-context <previous>`
-when you are done.
+`/usr/bin` can win even when your interactive shell finds v2. The same goes for every `kubectl`
+and `helm` call you make against the cluster afterwards, not just `deploy`: the kubeconfig entry
+runs `aws eks get-token` by name, so whichever `aws` is first on `PATH` *at call time* mints the
+token. A v1 there fails each call with `no kind "ExecCredential" is registered for version
+"client.authentication.k8s.io/v1alpha1"`, so keep v2 first in every command of the session.
+Note that `deploy` also selects `ack-dev-auto` as the current context; switch back with
+`kubectl config use-context <previous>` when you are done.
 
 **The controller exits at startup with `unable to determine account info`.** It has no AWS
 credentials, which under Pod Identity means the pod was admitted without the association's
@@ -896,6 +918,27 @@ ack-workspace deploy <svc> --dry-run  # preview, including any cluster creation
 ack-workspace deploy <svc>            # first run adds ~15-25 min for the cluster; later runs reuse it
 ack-workspace test <svc>              # run the e2e suite against what you just deployed
 ```
+
+**Compare a change against its base on the cluster (validate a PR's behavior live):**
+```bash
+git -C <workspace-root>/<svc>-controller fetch upstream pull/<n>/head:pr-<n>   # someone else's PR
+git -C <workspace-root>/<svc>-controller checkout --detach <base-sha>
+ack-workspace deploy <svc> --log-level debug   # each SHA builds once; redeploying it is a rollout
+# run the scenario, recording .status.conditions and `kubectl logs --since-time=<start>`
+git -C <workspace-root>/<svc>-controller checkout --detach pr-<n>
+ack-workspace deploy <svc> --log-level debug   # same scenario, same records
+git -C <workspace-root>/<svc>-controller checkout main   # deploy main afterwards to put the cluster back
+```
+- **Trigger reconciles deliberately.** The controller reconciles on a spec change (a new
+  `metadata.generation`) or a resync, and ignores status and label edits. Annotation edits only
+  trigger one when the runtime's `IgnoreFieldDrift` feature gate is on. After changing the
+  resource in AWS directly, change a spec field such as a tag to get an immediate reconcile. A
+  spec value that is set to what it already was does not count. Otherwise deploy with
+  `--resync-period 60`.
+- **Read state instead of waiting.** Condition messages and the debug log answer most questions
+  at once. Poll with a short, bounded loop that prints each observation.
+- **Choose fixtures that cost nothing to keep**, such as an ECS service with
+  `desiredCount: 0`, and delete them, along with the namespace, once you have your records.
 
 **Iterate on a single failing e2e test:**
 ```bash
