@@ -72,7 +72,7 @@ Requires Go 1.26+ to build. Every command declares what it needs and it is all v
 | `refresh`| `git` | yes¹ | yes | — |
 | `release`| `git` | yes² | yes | code-generator in workspace + its build deps |
 | `build`  | `git`, `make`, `go` | no | no | code-generator in workspace |
-| `deploy` | `git`, `docker`, `aws`, `kubectl`, `helm`, `eksctl`³ | no | no | AWS creds (may create an EKS cluster); code-generator in workspace |
+| `deploy` | `git`, `docker`, `aws`, `kubectl`, `helm`, `eksctl`³ | no | no | AWS creds (may create an EKS cluster); code-generator and test-infra in workspace |
 | `test`   | `git`, `kubectl`, `python3`⁵ | no | no | AWS creds; the controller already deployed on the cluster |
 | `status` | `git` | no | no | — |
 | `attribution` | `git` | no | no | AWS creds (CodeBuild, S3) |
@@ -174,6 +174,13 @@ Rules worth knowing, because each one is load-bearing:
   (`/home/you`) and its real path (`/local/home/you`) differ, as on cloud desktops.
 - **`config get` names the file** the persisted values came from and tags it `global` or
   `workspace-local`. Reach for it whenever a command targets an unexpected tree.
+- **Each workspace needs its own code-generator directory, not a symlink to another
+  workspace's.** The code-generator scripts find the controller, runtime and test-infra
+  relative to their own location with symlinks resolved, so through a symlink `build` would
+  regenerate the *other* workspace's controller and `deploy` would build its image. `build`,
+  `release` and `deploy` refuse that layout up front, naming the tree the scripts would have
+  used. To share one clone's objects, use `git -C <first>/code-generator worktree add
+  <second>/code-generator <ref>`, and the same for `runtime` and `test-infra`.
 
 ---
 
@@ -667,6 +674,20 @@ templates needs the code-generator run before `deploy` picks it up. Use `ack-wor
 `--workspace-root` (see the `build` command above). This replaces the manual env-override
 recipe that was previously required here.
 
+**`deploy` stops with `test-infra/build_config.yaml not found`.** The image build reads the Go
+and base-image versions from that file and has no override for its location, so `test-infra`
+must sit in the workspace root. `init` clones it; a hand-assembled root (for example one made
+of worktrees) needs it added. Older ack-workspace builds missed this and failed at the image
+build, after repointing the kubeconfig, with `pushd: .../test-infra: No such file or
+directory`.
+
+**`build`, `release` or `deploy` stops with `... outside the workspace root`.** The
+workspace's `code-generator` is a symlink into another tree. See [Several workspaces on one
+machine](#several-workspaces-on-one-machine): replace it with a clone or a `git worktree`.
+Older builds did not check this, and a `build` through such a symlink regenerated the other
+tree's controller while reporting success for this one. If that happened, check `git status`
+in both trees.
+
 ### `test` — run a controller's end-to-end suite
 
 Run a single controller's `test/e2e` suite against the controller **already running** on the
@@ -939,6 +960,18 @@ git -C <workspace-root>/<svc>-controller checkout main   # deploy main afterward
   at once. Poll with a short, bounded loop that prints each observation.
 - **Choose fixtures that cost nothing to keep**, such as an ECS service with
   `desiredCount: 0`, and delete them, along with the namespace, once you have your records.
+- **Save each phase's log before the next deploy.** A deploy replaces the pod, and its log goes
+  with it. Stream it to a file first: `kubectl -n ack-system logs -f <pod> > phase-a.log`.
+- **Record what you are replacing.** The cluster is shared, so the running image may be
+  someone else's work in progress. Note the tag and values (`helm -n ack-system get values
+  ack-<svc>-controller`) before the first deploy and restore them afterwards, rather than
+  assuming `main`. A variant that late-initializes fields also writes them into the spec of
+  every existing resource of that kind, and rolling the controller back does not undo that,
+  so record those specs too.
+- **To build one variant while another runs**, give each its own workspace root made with
+  `git worktree add` for `code-generator`, `runtime`, `test-infra` and the controller (see
+  [Several workspaces on one machine](#several-workspaces-on-one-machine)), and pass
+  `--workspace-root`.
 
 **Iterate on a single failing e2e test:**
 ```bash
