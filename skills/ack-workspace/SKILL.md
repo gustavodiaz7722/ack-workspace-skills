@@ -968,6 +968,23 @@ git -C <workspace-root>/<svc>-controller checkout main   # deploy main afterward
   assuming `main`. A variant that late-initializes fields also writes them into the spec of
   every existing resource of that kind, and rolling the controller back does not undo that,
   so record those specs too.
+- **Keep the test controller off other users' resources.** Every deploy installs the chart
+  watching all namespaces, so the new image reconciles every resource of its kinds on the
+  cluster. Setting `watchNamespace` in the chart's `values.yaml` does not help. The chart
+  renders it only when `installScope: namespace`, and `ack-workspace build` regenerates
+  `values.yaml` anyway. Scope the Deployment instead:
+  `kubectl -n ack-system set env deploy -l app.kubernetes.io/instance=ack-<svc>-controller ACK_WATCH_NAMESPACE=<test-ns>`.
+  Each deploy resets it, so chain it in the same command:
+  `ack-workspace deploy <svc> ... && kubectl ... set env ...`. In two chained deploys, the
+  helm-rolled pod was replaced before it reconciled anything, and CloudTrail showed no write to
+  other users' resources. When the same command ran by hand about 30 seconds after the deploy,
+  the unscoped pod had already reconciled every resource of its kinds on the cluster. To try
+  more variants, deploy once, scope it, and then switch images with `kubectl set image`, which
+  keeps the env value. Before an unscoped window, check whether the image would change other
+  users' resources. For a late-init change, for example, check whether AWS returns the new
+  fields for their resources. Afterwards, diff their `spec` and `metadata.generation` against
+  the snapshot. Both `set env` and `set image` leave a `kubectl-set` field manager behind, so
+  run the final rollback as `helm rollback --force-conflicts`.
 - **To build one variant while another runs**, give each its own workspace root made with
   `git worktree add` for `code-generator`, `runtime`, `test-infra` and the controller (see
   [Several workspaces on one machine](#several-workspaces-on-one-machine)), and pass
